@@ -115,6 +115,12 @@ public:
 	[[nodiscard]] QString data() const {
 		return _data;
 	}
+	void setLocal() {
+		_local = true;
+	}
+	[[nodiscard]] bool isLocal() const {
+		return _local;
+	}
 
 	void extendToLeft(int extent) {
 		_offset -= extent;
@@ -162,6 +168,7 @@ public:
 
 private:
 	EntityType _type = EntityType::Invalid;
+	bool _local = false;
 	int _offset = 0;
 	int _length = 0;
 	QString _data;
