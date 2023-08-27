@@ -36,6 +36,9 @@ PRIVATE
     fonts/fonts.qrc
     qt_conf/win.qrc
 
+    ayu/ayu_fonts.cpp
+    ayu/ayu_fonts.h
+
     ui/dpr/dpr_icon.cpp
     ui/dpr/dpr_icon.h
     ui/dpr/dpr_image.h
