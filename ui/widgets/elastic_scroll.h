@@ -12,6 +12,9 @@
 #include "base/object_ptr.h"
 #include "base/timer.h"
 
+
+// AyuGram includes
+#include "ayu/smooth_scroll/smooth_scroll.h"
 namespace style {
 struct ScrollArea;
 } // namespace style
@@ -184,6 +187,10 @@ public:
 
 	[[nodiscard]] rpl::producer<bool> touchMaybePressing() const;
 
+	// AyuGram smooth scroll
+	void stopSmoothScroll() {
+		_smoothScroll->stop();
+	}
 private:
 	bool eventHook(QEvent *e) override;
 	bool eventFilter(QObject *obj, QEvent *e) override;
@@ -277,6 +284,9 @@ private:
 	rpl::event_stream<> _innerResizes;
 	rpl::event_stream<> _geometryChanged;
 
+	// AyuGram smooth scroll
+	std::unique_ptr<SmoothScroll::Scroller> _smoothScroll;
+	bool handleWheelEventDefault(not_null<QWheelEvent*> e, bool touch);
 };
 
 [[nodiscard]] int OverscrollFromAccumulated(int accumulated);

@@ -357,8 +357,21 @@ ElasticScroll::ElasticScroll(
 , _movement(Movement::None) {
 	setAttribute(Qt::WA_AcceptTouchEvents);
 
+	// AyuGram smooth scroll
+	_smoothScroll = std::make_unique<SmoothScroll::Scroller>(SmoothScroll::Config({
+		.getScroll = [this] { return _state.visibleFrom; },
+		.setScroll = [this](int v) { applyScrollTo(v); },
+		.getNewTarget = [this](int t) { return willScrollTo(t); },
+	}));
+	// AyuGram smooth scroll
+
 	_bar->visibleFromDragged(
 	) | rpl::start_with_next([=](int from) {
+
+		// AyuGram smooth scroll
+		_smoothScroll->stop();
+		// AyuGram smooth scroll
+
 		tryScrollTo(from, false);
 	}, _bar->lifetime());
 }
@@ -659,7 +672,7 @@ void ElasticScroll::paintEvent(QPaintEvent *e) {
 	}
 }
 
-bool ElasticScroll::handleWheelEvent(not_null<QWheelEvent*> e, bool touch) {
+bool ElasticScroll::handleWheelEventDefault(not_null<QWheelEvent*> e, bool touch) {
 	if (_customWheelProcess
 		&& _customWheelProcess(static_cast<QWheelEvent*>(e.get()))) {
 		return true;
@@ -791,6 +804,8 @@ bool ElasticScroll::filterOutTouchEvent(QEvent *e) {
 }
 
 void ElasticScroll::handleTouchEvent(QTouchEvent *e) {
+	_smoothScroll->stop();
+
 	if (!e->touchPoints().isEmpty()) {
 		_touchPreviousPosition = _touchPosition;
 		_touchPosition = e->touchPoints().cbegin()->screenPos().toPoint();
@@ -1333,6 +1348,50 @@ int OverscrollToAccumulated(int overscroll) {
 	}
 	return (overscroll > 0 ? 1. : -1.)
 		* int(base::SafeRound(RawTo(std::abs(overscroll))));
+}
+
+
+// AyuGram smooth scroll
+
+bool ElasticScroll::handleWheelEvent(not_null<QWheelEvent*> e, bool touch) {
+	if (_customWheelProcess
+		&& _customWheelProcess(static_cast<QWheelEvent*>(e))) {
+		return true;
+	}
+	const auto phase = e->phase();
+	const auto momentum = (phase == Qt::ScrollMomentum)
+		|| (phase == Qt::ScrollEnd);
+
+	if (momentum || touch) {
+		stopSmoothScroll();
+		return handleWheelEventDefault(e, touch);
+	}
+
+	if (phase == Qt::NoScrollPhase) {
+		const auto unmultiplied = ScrollDelta(e, touch);
+		const auto multiply = e->modifiers()
+			& (Qt::ControlModifier | Qt::ShiftModifier);
+		const auto pixels = multiply
+			? QPoint(
+				(unmultiplied.x() * std::max(width(), 120) / 120.),
+				(unmultiplied.y() * std::max(height(), 120) / 120.))
+			: unmultiplied;
+		auto delta = _vertical ? -pixels.y() : pixels.x();
+		if (std::abs(_vertical ? pixels.x() : pixels.y()) >= std::abs(delta)) {
+			delta = 0;
+		}
+
+		if (delta != 0) {
+			overscrollReturnCancel();
+
+			if (!_smoothScroll->handleScroll(delta)) {
+				return handleWheelEventDefault(e, touch);
+			}
+		}
+		return true;
+	}
+
+	return false;
 }
 
 } // namespace Ui

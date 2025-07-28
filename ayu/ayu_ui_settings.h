@@ -16,4 +16,7 @@ void setWideMultiplier(double val);
 bool isWideMultiplied();
 int getWideMultiplied(int width, double mult);
 
+
+void setSmoothScroll(bool val);
+bool isSmoothScroll();
 }

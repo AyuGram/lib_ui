@@ -422,6 +422,17 @@ ScrollArea::ScrollArea(
 		_touchTimer.setCallback([=] { _touchRightButton = true; });
 		_touchScrollTimer.setCallback([=] { touchScrollTimer(); });
 	}
+
+	// AyuGram smooth scroll
+	_smoothScroll = std::make_unique<SmoothScroll::Scroller>(SmoothScroll::Config{
+		.getScroll = [this] { return scrollTop(); },
+		.setScroll = [this](int v) { scrollToY(v); },
+		.getNewTarget = [vbar = verticalScrollBar()](int t)
+		{
+			return std::clamp(t, vbar->minimum(), vbar->maximum());
+		},
+	});
+
 }
 
 void ScrollArea::touchDeaccelerate(int32 elapsed) {
@@ -590,6 +601,45 @@ bool ScrollArea::viewportEvent(QEvent *e) {
 			&& _customWheelProcess(static_cast<QWheelEvent*>(e))) {
 			return true;
 		}
+
+		const auto ev = static_cast<QWheelEvent*>(e);
+		const auto phase = ev->phase();
+
+		if (phase == Qt::ScrollMomentum || phase == Qt::ScrollEnd) {
+			return QScrollArea::viewportEvent(e);
+		}
+
+		const auto unmultiplied = ScrollDelta(ev);
+		const auto multiply = ev->modifiers()
+			& (Qt::ControlModifier | Qt::ShiftModifier);
+		const auto scroll = multiply
+								? QPoint(
+									(unmultiplied.x() * std::max(width(), 120) / 120.),
+									(unmultiplied.y() * std::max(height(), 120) / 120.))
+								: unmultiplied;
+
+		const auto deltaX = scroll.x();
+		const auto deltaY = scroll.y();
+
+
+		if (deltaX == 0 && deltaY == 0) {
+			return QScrollArea::viewportEvent(e);
+		}
+
+		const auto vbar = verticalScrollBar();
+		const auto hbar = horizontalScrollBar();
+		if (vbar->minimum() < vbar->maximum()
+			&& (hbar->minimum() == hbar->maximum()
+				|| std::abs(deltaY) >= std::abs(deltaX))) {
+			if (!_smoothScroll->handleScroll(-deltaY)) {
+				return QScrollArea::viewportEvent(e);
+			}
+		} else if (hbar->minimum() < hbar->maximum()) {
+			if (!_smoothScroll->handleScroll(-deltaX)) {
+				return QScrollArea::viewportEvent(e);
+			}
+		}
+		return true;
 	}
 	return QScrollArea::viewportEvent(e);
 }
@@ -614,6 +664,8 @@ bool ScrollArea::filterOutTouchEvent(QEvent *e) {
 }
 
 void ScrollArea::touchEvent(QTouchEvent *e) {
+	stopSmoothScroll();
+
 	if (!e->touchPoints().isEmpty()) {
 		_touchPrevPos = _touchPos;
 		_touchPos = e->touchPoints().cbegin()->screenPos().toPoint();
@@ -889,6 +941,9 @@ bool ScrollArea::focusNextPrevChild(bool next) {
 }
 
 void ScrollArea::setMovingByScrollBar(bool movingByScrollBar) {
+	if (movingByScrollBar) {
+		stopSmoothScroll();
+	}
 	_movingByScrollBar = movingByScrollBar;
 }
 

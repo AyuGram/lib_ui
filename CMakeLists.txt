@@ -38,6 +38,8 @@ PRIVATE
 
     ayu/ayu_ui_settings.cpp
     ayu/ayu_ui_settings.h
+    ayu/smooth_scroll/smooth_scroll.cpp
+    ayu/smooth_scroll/smooth_scroll.h
 
     ui/dpr/dpr_icon.cpp
     ui/dpr/dpr_icon.h

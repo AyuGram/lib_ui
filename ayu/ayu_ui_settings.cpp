@@ -12,6 +12,7 @@ namespace AyuUiSettings {
 
 QString monoFont;
 double wideMultiplier = 1.0;
+bool smoothScroll = true;
 
 void setMonoFont(QString newFont) {
 	monoFont = std::move(newFont);
@@ -35,6 +36,14 @@ int getWideMultiplied(int width, double mult) {
 	}
 	const auto res = width * (wideMultiplier * mult);
 	return std::max(width, static_cast<int>(std::round(res)));
+}
+
+void setSmoothScroll(bool val) {
+	smoothScroll = val;
+}
+
+bool isSmoothScroll() {
+	return smoothScroll;
 }
 
 }
