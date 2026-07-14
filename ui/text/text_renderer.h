@@ -219,6 +219,7 @@ private:
 	bool _elisionMiddle = false;
 
 	const LinePostprocess *_linePostprocess = nullptr;
+	bool _revealSpoilers = false;
 
 };
 

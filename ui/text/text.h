@@ -89,6 +89,8 @@ struct QuotesData;
 struct ExtendedData;
 struct MarkedContext;
 
+extern bool (*RevealAllSpoilersCallback)();
+
 using CustomEmojiFactory = Fn<std::unique_ptr<CustomEmoji>(
 	QStringView,
 	const MarkedContext &)>;
@@ -274,6 +276,8 @@ struct PaintContext {
 	bool elisionMiddle = false;
 	bool useFullWidth = false; // !(width = min(availableWidth, maxWidth()))
 	const LinePostprocess *linePostprocess = nullptr;
+	bool revealSpoilers = false;
+	bool disableRevealAllSpoilers = false;
 };
 
 class String {
