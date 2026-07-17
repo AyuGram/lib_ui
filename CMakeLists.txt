@@ -95,6 +95,13 @@ PRIVATE
     ui/gl/gl_surface.h
     ui/gl/gl_window.cpp
     ui/gl/gl_window.h
+    ui/rhi/rhi_image.cpp
+    ui/rhi/rhi_image.h
+    ui/rhi/rhi_renderer.h
+    ui/rhi/rhi_shader.cpp
+    ui/rhi/rhi_shader.h
+    ui/rhi/rhi_surface.cpp
+    ui/rhi/rhi_surface.h
     ui/image/image_prepare.cpp
     ui/image/image_prepare.h
     ui/layers/box_content.cpp
@@ -183,6 +190,8 @@ PRIVATE
     ui/text/text_entity.h
     ui/text/text_extended_data.cpp
     ui/text/text_extended_data.h
+    ui/text/text_html_tags.cpp
+    ui/text/text_html_tags.h
     ui/text/text_isolated_emoji.h
     ui/text/text_renderer.cpp
     ui/text/text_renderer.h
