@@ -250,7 +250,13 @@ not_null<QAction*> PopupMenu::addAction(
 		action,
 		base::unique_qptr<PopupMenu>(submenu.release())
 	).first->second.get();
-	saved->setParent(parentWidget());
+	// Reparent under our own parent (like ensureSubmenu and the QMenu
+	// constructor do), but keep the window flags: the single-argument
+	// QWidget::setParent() resets them, which strips the Qt::Popup type set
+	// in init() and demotes the submenu to a plain child widget. Such a widget
+	// has no windowHandle() after createWinId(), so prepareGeometryFor() can't
+	// show it.
+	saved->setParent(parentWidget(), saved->windowFlags());
 	saved->deleteOnHide(false);
 	return action;
 }
@@ -364,11 +370,14 @@ void PopupMenu::handleTriggered(const Menu::CallbackData &data) {
 		if (!data.preventClose) {
 			hideMenu();
 		}
+		auto weak = base::make_weak(this);
 		data.action->trigger();
-		_triggering = false;
-		if (_deleteLater) {
-			_deleteLater = false;
-			deleteLater();
+		if (weak) {
+			_triggering = false;
+			if (_deleteLater) {
+				_deleteLater = false;
+				deleteLater();
+			}
 		}
 	}
 }
@@ -403,7 +412,10 @@ void PopupMenu::popupSubmenu(
 		_activeSubmenu = submenu;
 		_activeSubmenu->menu()->clearSelection();
 		_activeSubmenu->setAccessibleName(action->text());
-		if (_activeSubmenu->prepareGeometryFor(geometry().topLeft() + p, this)) {
+		if (_activeSubmenu->prepareGeometryFor(
+				geometry().topLeft() + p,
+				this,
+				_menu->itemForAction(action))) {
 			_activeSubmenu->showPrepared(source);
 			_menu->setChildShownAction(action);
 		} else {
@@ -835,10 +847,13 @@ rpl::producer<PopupMenu::ShowState> PopupMenu::showStateValue() const {
 }
 
 bool PopupMenu::prepareGeometryFor(const QPoint &p) {
-	return prepareGeometryFor(p, nullptr);
+	return prepareGeometryFor(p, nullptr, nullptr);
 }
 
-bool PopupMenu::prepareGeometryFor(const QPoint &p, PopupMenu *parent) {
+bool PopupMenu::prepareGeometryFor(
+		const QPoint &p,
+		PopupMenu *parent,
+		QWidget *parentActionWidget) {
 	if (_clearLastSeparator) {
 		_menu->clearLastSeparator();
 		for (const auto &[action, submenu] : _submenus) {
@@ -899,12 +914,14 @@ bool PopupMenu::prepareGeometryFor(const QPoint &p, PopupMenu *parent) {
 		base::take(r);
 		if (_parent) {
 			// we must have an action to position the submenu around
-			const auto action = not_null(
-				_parent->menu()->findSelectedAction());
+			Assert(parentActionWidget != nullptr);
 			native->setParentControlGeometry(
 				QRect(
-					action->mapTo(action->window(), QPoint()),
-					action->size()) + _st.scrollPadding);
+					parentActionWidget->mapTo(
+						parentActionWidget->window(),
+						QPoint()),
+					parentActionWidget->size())
+				+ _st.scrollPadding);
 		} else if (padding.top()) {
 			// provide the compositor with a range for flip_y so it uses
 			// the cursor point instead of the padding's top point
