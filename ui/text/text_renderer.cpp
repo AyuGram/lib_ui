@@ -158,7 +158,11 @@ void Renderer::draw(QPainter &p, const PaintContext &context) {
 	_cachedNow = context.now;
 	_pausedEmoji = context.paused || context.pausedEmoji;
 	_pausedSpoiler = context.paused || context.pausedSpoiler;
-	_spoilerOpacity = _spoiler
+	_revealSpoilers = context.revealSpoilers
+		|| (Ui::Text::RevealAllSpoilersCallback
+			&& Ui::Text::RevealAllSpoilersCallback()
+			&& !context.disableRevealAllSpoilers);
+	_spoilerOpacity = (_spoiler && !_revealSpoilers)
 		? (1. - _spoiler->revealAnimation.value(
 			_spoiler->revealed ? 1. : 0.))
 		: 0.;
@@ -1598,7 +1602,7 @@ void Renderer::fillRectsFromRanges(
 void Renderer::paintSpoilerRects() {
 	Expects(_p != nullptr);
 
-	if (!_spoiler) {
+	if (!_spoiler || _revealSpoilers) {
 		return;
 	}
 	const auto opacity = _p->opacity();
@@ -1913,6 +1917,7 @@ void Renderer::applyBlockProperties(
 ClickHandlerPtr Renderer::lookupLink(const AbstractBlock *block) const {
 	const auto spoilerLink = (_spoiler
 		&& !_spoiler->revealed
+		&& !_revealSpoilers
 		&& (block->flags() & TextBlockFlag::Spoiler))
 		? _spoiler->link
 		: ClickHandlerPtr();

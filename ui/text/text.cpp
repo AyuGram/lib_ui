@@ -32,6 +32,9 @@ const QString kQBullet = QString::fromUtf8("\xE2\x80\xA2");
 } // namespace Ui
 
 namespace Ui::Text {
+
+bool (*RevealAllSpoilersCallback)() = nullptr;
+
 namespace {
 
 constexpr auto kDefaultSpoilerCacheCapacity = 24;
