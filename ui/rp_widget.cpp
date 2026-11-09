@@ -358,6 +358,10 @@ RpWidget::RpWidget(QWidget *parent)
 	[[maybe_unused]] static const auto Once = [] {
 		auto format = QSurfaceFormat::defaultFormat();
 		format.setSwapInterval(::Platform::MetalSupported() ? 1 : 0);
+#ifdef Q_OS_WIN
+		// DirectComposition composites swap chain only with alpha in it.
+		format.setAlphaBufferSize(8);
+#endif // Q_OS_WIN
 #ifdef DESKTOP_APP_USE_ANGLE
 		format.setRedBufferSize(8);
 		format.setGreenBufferSize(8);
@@ -391,7 +395,7 @@ Qt::FocusPolicy RpWidget::accessibilityFocusPolicy() {
 		|| (role == QAccessible::Role::ButtonMenu)
 		|| (role == QAccessible::Role::Link)
 		|| (role == QAccessible::Role::CheckBox)
-#if QT_VERSION >= QT_VERSION_CHECK(6, 11, 0)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 11, 0) || defined(QT_ACCESSIBLE_SWITCH_ROLE)
 		|| (role == QAccessible::Role::Switch)
 #endif
 		|| (role == QAccessible::Role::Slider);
@@ -400,6 +404,10 @@ Qt::FocusPolicy RpWidget::accessibilityFocusPolicy() {
 
 QAccessible::Role RpWidget::accessibilityChildRole() const {
 	return QAccessible::Role::NoRole;
+}
+
+QAccessible::Role RpWidget::accessibilityChildRoleAt(int index) const {
+	return accessibilityChildRole();
 }
 
 QString RpWidget::accessibilityChildName(int index) const {
@@ -466,6 +474,18 @@ void RpWidget::accessibilityChildStateChanged(
 	QAccessible::updateAccessibility(&event);
 }
 
+void RpWidget::accessibilityChildSelectionChanged(int index) {
+	if constexpr (Platform::IsLinux()) {
+		QAccessibleEvent event(this, accessibilityChildState(index).selected
+			? QAccessible::SelectionAdd
+			: QAccessible::SelectionRemove);
+		event.setChild(index);
+		QAccessible::updateAccessibility(&event);
+	} else {
+		accessibilityChildStateChanged(index, { .selected = true });
+	}
+}
+
 void RpWidget::accessibilityChildFocused(int index) {
 	QAccessibleEvent event(this, QAccessible::Focus);
 	event.setChild(index);
@@ -488,6 +508,9 @@ void RpWidget::accessibilityChildSetFocus(quintptr identity) {
 }
 
 void RpWidget::accessibilityChildActivate(quintptr identity) {
+}
+
+void RpWidget::accessibilityChildShowMenu(quintptr identity) {
 }
 
 QString RpWidget::accessibilityName() {

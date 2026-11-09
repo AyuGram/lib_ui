@@ -101,6 +101,7 @@ public:
 	bool prepareGeometryFor(const QPoint &p);
 	void popupPrepared();
 	void hideMenu(bool fast = false);
+	void refreshAnimationCache();
 	void setTopShift(int topShift);
 	void setForceWidth(int forceWidth);
 	void setForcedOrigin(PanelAnimation::Origin origin);
@@ -154,6 +155,7 @@ protected:
 	void mousePressEvent(QMouseEvent *e) override;
 
 	bool eventFilter(QObject *o, QEvent *e) override;
+	bool focusNextPrevChild(bool next) override;
 
 private:
 	struct SubmenuAim;
@@ -165,6 +167,7 @@ private:
 	void hideAnimated();
 
 	QImage grabForPanelAnimation();
+	void prepareShowAnimation();
 	void startShowAnimation();
 	void startOpacityAnimation(bool hiding);
 	void prepareCache();
@@ -263,6 +266,7 @@ private:
 	bool _deleteLater = false;
 	bool _reactivateParent = true;
 	bool _grabbingForPanelAnimation = false;
+	bool _refreshingAnimationCache = false;
 
 	TouchForward _touchForward;
 	int _touchBeginCounter = 0;
@@ -297,5 +301,20 @@ private:
 	void startSwitchAnimation(not_null<SwitchState*> raw, float64 from);
 
 };
+
+// Where to show a context menu for the given event: at the mouse cursor for
+// a mouse-invoked one, on the anchor for a keyboard-invoked one - the mouse
+// may sit nowhere near the control then (or outside the window altogether),
+// and the position Qt puts into the keyboard event is no help either, it is
+// synthesized from the input method rect, which plain controls leave empty.
+// The rect is in the anchor's coordinates and defaults to its whole area -
+// pass one to anchor on a painted element inside the anchor widget.
+[[nodiscard]] QPoint ContextMenuPosition(
+	not_null<QWidget*> anchor,
+	not_null<QContextMenuEvent*> e);
+[[nodiscard]] QPoint ContextMenuPosition(
+	not_null<QWidget*> anchor,
+	not_null<QContextMenuEvent*> e,
+	QRect rect);
 
 } // namespace Ui

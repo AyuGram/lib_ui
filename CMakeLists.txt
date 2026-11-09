@@ -102,6 +102,10 @@ PRIVATE
     ui/rhi/rhi_shader.h
     ui/rhi/rhi_surface.cpp
     ui/rhi/rhi_surface.h
+    ui/image/image_blur_simd.h
+    ui/image/image_blur_simd_generic.h
+    ui/image/image_blur_simd_neon.h
+    ui/image/image_blur_simd_sse2.h
     ui/image/image_prepare.cpp
     ui/image/image_prepare.h
     ui/image/svg_safety.cpp
@@ -275,6 +279,7 @@ PRIVATE
     ui/widgets/separate_panel.h
     ui/widgets/scroll_area.cpp
     ui/widgets/scroll_area.h
+    ui/widgets/scroll_math.h
     ui/widgets/side_bar_button.cpp
     ui/widgets/side_bar_button.h
     ui/widgets/shadow.cpp
@@ -349,7 +354,7 @@ PRIVATE
     emoji_suggestions/emoji_suggestions_helper.h
 )
 
-if (QT_VERSION_MAJOR LESS 6)
+if (QT_VERSION_MAJOR LESS 6 OR DESKTOP_APP_DISABLE_PRIVATE_QT_API)
     remove_target_sources(lib_ui ${src_loc}
         ui/widgets/kinetic_scroller.cpp
     )
@@ -367,8 +372,12 @@ if (DESKTOP_APP_USE_PANGO)
         ui/text/text_stack_engine.cpp
         ui/text/text_stack_engine.h
     )
-    target_compile_definitions(lib_ui PRIVATE LIB_UI_USE_PANGO)
-    target_link_libraries(lib_ui PRIVATE desktop-app::external_pango)
+    target_link_libraries(lib_ui PRIVATE $<LINK_ONLY:desktop-app::external_pango>)
+    set_source_files_properties(${src_loc}/ui/text/text_shaper_pango.cpp
+    PROPERTIES
+        INCLUDE_DIRECTORIES "$<TARGET_PROPERTY:desktop-app::external_pango,INTERFACE_INCLUDE_DIRECTORIES>"
+        COMPILE_OPTIONS "$<TARGET_PROPERTY:desktop-app::external_pango,INTERFACE_COMPILE_OPTIONS>"
+    )
 else()
     remove_target_sources(lib_ui ${src_loc}
         ui/platform/linux/ui_font_settings_linux.cpp
@@ -393,8 +402,12 @@ PRIVATE
     desktop-app::external_xxhash
 )
 
-if (WIN32 AND QT_VERSION LESS 6)
+if (WIN32 AND (QT_VERSION LESS 6 OR DESKTOP_APP_WIN7_BASELINE))
     target_link_libraries(lib_ui PRIVATE desktop-app::external_angle)
+endif()
+
+if (WIN32 AND NOT QT_VERSION LESS 6 AND DESKTOP_APP_WIN7_BASELINE)
+    target_compile_definitions(lib_ui PUBLIC DESKTOP_APP_QT6_ANGLE)
 endif()
 
 target_prepare_qrc(lib_ui)
