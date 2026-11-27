@@ -44,7 +44,7 @@ constexpr auto kDefaultSpoilerCacheCapacity = 24;
 // lives that long - what keeps such results keeps a handful of them and
 // throws the rest away, long before the count comes around.
 [[nodiscard]] uint NextLayoutId() {
-	static auto counter = uint(0);
+	static auto counter = std::atomic<uint>();
 	return ++counter;
 }
 
@@ -790,8 +790,23 @@ void String::setMarkedText(
 void String::setLink(uint16 index, const ClickHandlerPtr &link) {
 	const auto extended = _extended.get();
 	if (extended && index > 0 && index <= extended->links.size()) {
-		extended->links[index - 1] = link;
+		// WHY: owners bind indexed links by id after parsing, so the id of
+		// a link the parser skipped must not replace the handler of
+		// whichever cell took that number.
+		const auto skipped = extended->skippedLinkIndices.get();
+		if (!skipped || !ranges::binary_search(*skipped, index)) {
+			extended->links[index - 1] = link;
+		}
 	}
+}
+
+const ClickHandlerPtr &String::linkByIndex(uint16 index) const {
+	// A block with a link index past the end is a parser bug, but it
+	// should cost a dead link and not a read of whatever lies there.
+	static const auto kEmpty = ClickHandlerPtr();
+	return (_extended && index > 0 && index <= _extended->links.size())
+		? _extended->links[index - 1]
+		: kEmpty;
 }
 
 TextSelection String::linkRangeFor(const ClickHandlerPtr &link) const {
@@ -864,12 +879,14 @@ bool String::hasCustomEmoji() const {
 
 void String::setCustomEmojiClickHandler(
 		Fn<bool(QStringView)> predicate,
-		Fn<void(QStringView, ClickContext)> callback) {
+		Fn<void(QStringView, ClickContext)> callback,
+		Fn<CustomEmojiLinkTexts(QStringView)> texts) {
 	const auto extended = ensureExtended();
 	extended->customEmoji = std::make_shared<CustomEmojiData>();
 	const auto &data = extended->customEmoji;
 	data->predicate = std::move(predicate);
 	data->callback = std::move(callback);
+	data->texts = std::move(texts);
 }
 
 void String::setBlockquoteExpandCallback(
@@ -1387,6 +1404,12 @@ StateResult String::getState(
 	return Renderer(*this).getState(point, std::move(geometry), request);
 }
 
+std::vector<QRect> String::countHighlightRects(
+		std::span<const TextSelection> ranges,
+		const HighlightRectsRequest &request) const {
+	return Renderer(*this).highlightRects(ranges, request);
+}
+
 void String::draw(Painter &p, int32 left, int32 top, int32 w, style::align align, int32 yFrom, int32 yTo, TextSelection selection, bool fullWidthSelection) const {
 //	p.fillRect(QRect(left, top, w, countHeight(w)), QColor(0, 0, 0, 32)); // debug
 	Renderer(*this).draw(p, {
@@ -1830,9 +1853,7 @@ void String::enumerateText(
 				return 0;
 			}
 			const auto result = (*i)->linkIndex();
-			return (result && _extended && _extended->links[result - 1])
-				? result
-				: 0;
+			return linkByIndex(result) ? result : 0;
 		}();
 		if (blockLinkIndex != linkIndex) {
 			if (linkIndex) {
@@ -1845,10 +1866,9 @@ void String::enumerateText(
 						rangeTo - rangeFrom);
 					// Ignore links that are partially copied.
 					const auto handler = (linkPosition != rangeFrom
-						|| blockPosition != rangeTo
-						|| !_extended)
+						|| blockPosition != rangeTo)
 						? nullptr
-						: _extended->links[linkIndex - 1];
+						: linkByIndex(linkIndex);
 					const auto type = handler
 						? handler->getTextEntity().type
 						: EntityType::Invalid;
@@ -1858,9 +1878,7 @@ void String::enumerateText(
 			linkIndex = blockLinkIndex;
 			if (linkIndex) {
 				linkPosition = blockPosition;
-				const auto handler = _extended
-					? _extended->links[linkIndex - 1]
-					: nullptr;
+				const auto &handler = linkByIndex(linkIndex);
 				clickHandlerStartCallback(handler
 					? handler->getTextEntity().type
 					: EntityType::Invalid);
@@ -2105,6 +2123,7 @@ TextForMimeData String::toText(
 		const auto plainUrl = (entity.type == EntityType::Url)
 			|| (entity.type == EntityType::Email)
 			|| (entity.type == EntityType::BankCard)
+			|| (entity.type == EntityType::TonAddress)
 			|| (entity.type == EntityType::Phone);
 		const auto inText = QStringView(result.rich.text).mid(linkStart);
 		const auto full = plainUrl

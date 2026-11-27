@@ -158,14 +158,14 @@ rpl::producer<> RpWidgetWrap::death() const {
 }
 
 rpl::producer<> RpWidgetWrap::macWindowDeactivateEvents() const {
-#ifdef Q_OS_MAC
+#ifdef Q_OS_MACOS
 	return windowActiveValue()
 		| rpl::skip(1)
 		| rpl::filter(!rpl::mappers::_1)
 		| rpl::to_empty;
-#else // Q_OS_MAC
+#else // Q_OS_MACOS
 	return rpl::never<rpl::empty_value>();
-#endif // Q_OS_MAC
+#endif // Q_OS_MACOS
 }
 
 rpl::producer<WId> RpWidgetWrap::winIdValue() const {
@@ -357,15 +357,17 @@ RpWidget::RpWidget(QWidget *parent)
 : RpWidgetBase<QWidget>(parent) {
 	[[maybe_unused]] static const auto Once = [] {
 		auto format = QSurfaceFormat::defaultFormat();
-		format.setSwapInterval(::Platform::MetalSupported() ? 1 : 0);
+		if (!::Platform::MetalSupported()) {
+			format.setSwapInterval(0);
+		}
 #ifdef DESKTOP_APP_USE_ANGLE
 		format.setRedBufferSize(8);
 		format.setGreenBufferSize(8);
 		format.setBlueBufferSize(8);
 #endif // DESKTOP_APP_USE_ANGLE
-#ifdef Q_OS_MAC
+#ifdef Q_OS_MACOS
 		format.setColorSpace(QColorSpace::SRgb);
-#endif // Q_OS_MAC
+#endif // Q_OS_MACOS
 		QSurfaceFormat::setDefaultFormat(format);
 		return true;
 	}();
@@ -391,7 +393,7 @@ Qt::FocusPolicy RpWidget::accessibilityFocusPolicy() {
 		|| (role == QAccessible::Role::ButtonMenu)
 		|| (role == QAccessible::Role::Link)
 		|| (role == QAccessible::Role::CheckBox)
-#if QT_VERSION >= QT_VERSION_CHECK(6, 11, 0)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 11, 0) || defined(QT_ACCESSIBLE_SWITCH_ROLE)
 		|| (role == QAccessible::Role::Switch)
 #endif
 		|| (role == QAccessible::Role::Slider);
@@ -400,6 +402,10 @@ Qt::FocusPolicy RpWidget::accessibilityFocusPolicy() {
 
 QAccessible::Role RpWidget::accessibilityChildRole() const {
 	return QAccessible::Role::NoRole;
+}
+
+QAccessible::Role RpWidget::accessibilityChildRoleAt(int index) const {
+	return accessibilityChildRole();
 }
 
 QString RpWidget::accessibilityChildName(int index) const {
@@ -466,6 +472,18 @@ void RpWidget::accessibilityChildStateChanged(
 	QAccessible::updateAccessibility(&event);
 }
 
+void RpWidget::accessibilityChildSelectionChanged(int index) {
+	if constexpr (Platform::IsLinux()) {
+		QAccessibleEvent event(this, accessibilityChildState(index).selected
+			? QAccessible::SelectionAdd
+			: QAccessible::SelectionRemove);
+		event.setChild(index);
+		QAccessible::updateAccessibility(&event);
+	} else {
+		accessibilityChildStateChanged(index, { .selected = true });
+	}
+}
+
 void RpWidget::accessibilityChildFocused(int index) {
 	QAccessibleEvent event(this, QAccessible::Focus);
 	event.setChild(index);
@@ -488,6 +506,9 @@ void RpWidget::accessibilityChildSetFocus(quintptr identity) {
 }
 
 void RpWidget::accessibilityChildActivate(quintptr identity) {
+}
+
+void RpWidget::accessibilityChildShowMenu(quintptr identity) {
 }
 
 QString RpWidget::accessibilityName() {

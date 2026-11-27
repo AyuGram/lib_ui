@@ -10,6 +10,8 @@
 #include "base/object_ptr.h"
 #include "ui/round_rect.h"
 
+class QScreen;
+
 namespace style {
 struct WindowTitle;
 struct TextStyle;
@@ -25,6 +27,7 @@ using WindowTitleHitTestFlags = base::flags<WindowTitleHitTestFlag>;
 namespace Platform {
 
 struct HitTestRequest;
+struct SystemCommandRequest;
 enum class HitTestResult;
 class DefaultTitleWidget;
 
@@ -41,6 +44,10 @@ public:
 	[[nodiscard]] virtual not_null<RpWidget*> body();
 	[[nodiscard]] virtual RpWidget *titleWidget();
 	[[nodiscard]] virtual QMargins frameMargins();
+	[[nodiscard]] virtual QRect fitFrameInWorkArea(
+		QRect body,
+		QRect space,
+		not_null<const QScreen*> screen) const;
 	[[nodiscard]] virtual int additionalContentPadding() const;
 	[[nodiscard]] virtual auto additionalContentPaddingValue() const
 		-> rpl::producer<int>;
@@ -50,6 +57,8 @@ public:
 		-> rpl::producer<HitTestResult>;
 	[[nodiscard]] virtual auto systemButtonDown() const
 		-> rpl::producer<HitTestResult>;
+	[[nodiscard]] virtual auto systemCommandRequests() const
+		-> rpl::producer<not_null<SystemCommandRequest*>>;
 	virtual void overrideSystemButtonOver(HitTestResult button);
 	virtual void overrideSystemButtonDown(HitTestResult button);
 	virtual void setTitle(const QString &title);
@@ -113,6 +122,7 @@ private:
 	void updateRoundingOverlay();
 	[[nodiscard]] bool hasShadow() const;
 	[[nodiscard]] QMargins resizeArea() const;
+	[[nodiscard]] QMargins normalResizeArea() const;
 	[[nodiscard]] Qt::Edges edgesFromPos(const QPoint &pos) const;
 	void paintBorders(QPainter &p);
 	void updateWindowMargins();

@@ -9,7 +9,9 @@
 #include "base/algorithm.h"
 #include "base/debug_log.h"
 #include "base/base_file_utilities.h"
-#include "ui/integration.h"
+#include "ui/text/text_shaper.h"
+
+#include <atomic>
 
 #include <QtCore/QMap>
 #include <QtCore/QVector>
@@ -21,17 +23,19 @@
 #include <glib.h>
 #endif // __has_include(<glib.h>)
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif // Q_OS_WIN
 
 // AyuGram includes
 #include "ayu/ayu_ui_settings.h"
 
-
 void style_InitFontsResource() {
-#ifdef Q_OS_MAC // Use resources from the .app bundle on macOS.
+#ifdef Q_OS_MACOS // Use resources from the .app bundle on macOS.
 
 	base::RegisterBundledResources(u"lib_ui.rcc"_q);
 
-#else // Q_OS_MAC
+#else // Q_OS_MACOS
 
 #ifndef LIB_UI_USE_PACKAGED_FONTS
 	Q_INIT_RESOURCE(fonts);
@@ -40,7 +44,7 @@ void style_InitFontsResource() {
 	Q_INIT_RESOURCE(win);
 #endif // Q_OS_WIN
 
-#endif // Q_OS_MAC
+#endif // Q_OS_MACOS
 }
 
 namespace style {
@@ -107,31 +111,6 @@ base::flat_map<uint64, uint32> QtFontsKeys;
 		| (uint64(font.pixelSize()));
 }
 
-#ifdef LIB_UI_USE_PANGO
-
-// A font added straight from the resources is registered with fontconfig under
-// its resource path, which nothing but Qt can open - and here the text is
-// shaped and drawn by Pango, through fontconfig. So the fonts are written out
-// once and loaded from real files, which both can read.
-[[nodiscard]] QString ExtractedFontPath(const QString &filePath) {
-	const auto directory = Ui::Integration::Instance().fontsCacheFolder();
-	if (directory.isEmpty() || !QDir().mkpath(directory)) {
-		LOG(("Font Error: could not create '%1'.").arg(directory));
-		return filePath;
-	}
-	const auto result = directory + '/' + QFileInfo(filePath).fileName();
-	if (QFile::exists(result)) {
-		QFile::remove(result);
-	}
-	if (!QFile::copy(filePath, result)) {
-		LOG(("Font Error: could not write '%1'.").arg(result));
-		return filePath;
-	}
-	return result;
-}
-
-#endif // LIB_UI_USE_PANGO
-
 bool LoadCustomFont(const QString &filePath) {
 	auto regularId = QFontDatabase::addApplicationFont(filePath);
 	if (regularId < 0) {
@@ -188,6 +167,19 @@ bool LoadCustomFont(const QString &filePath) {
 	}();
 
 	return family;
+}
+
+[[nodiscard]] bool FontSmoothingDisabled() {
+#ifdef Q_OS_WIN
+	static const auto result = [] {
+		BOOL enabled = TRUE;
+		SystemParametersInfo(SPI_GETFONTSMOOTHING, 0, &enabled, 0);
+		return !enabled;
+	}();
+	return result;
+#else // Q_OS_WIN
+	return false;
+#endif // Q_OS_WIN
 }
 
 struct Metrics {
@@ -340,7 +332,10 @@ struct Metrics {
 	auto font = QFont(QFont().family());
 
 	const auto monospace = (flags & FontFlag::Monospace) != 0;
-	const auto system = !monospace && (family == SystemFontTag());
+	// Open Sans has no horizontal hints for rendering without smoothing
+	const auto system = !monospace
+		&& ((family == SystemFontTag())
+			|| (family.isEmpty() && FontSmoothingDisabled()));
 	const auto overriden = !monospace && !system && !family.isEmpty();
 	if (monospace) {
 		font.setFamily(MonospaceFont());
@@ -405,12 +400,7 @@ void StartFonts() {
 	const auto name = u"Open Sans"_q;
 
 	for (const auto &file : QDir(u":/gui/fonts/"_q).entryInfoList()) {
-		const auto path = file.canonicalFilePath();
-#ifdef LIB_UI_USE_PANGO
-		LoadCustomFont(ExtractedFontPath(path));
-#else // LIB_UI_USE_PANGO
-		LoadCustomFont(path);
-#endif // !LIB_UI_USE_PANGO
+		LoadCustomFont(Ui::Text::FontPath(file.canonicalFilePath()));
 	}
 
 	if (!QFontInfo(name).family().trimmed().startsWith(
@@ -434,7 +424,7 @@ void StartFonts() {
 		// https://qt-project.atlassian.net/browse/QTBUG-94756
 		u"Nirmala UI"_q,
 	});
-#elif defined Q_OS_MAC // Q_OS_WIN
+#elif defined Q_OS_MACOS // Q_OS_WIN
 	const auto list = QStringList{
 		u"STIXGeneral"_q,
 		u".SF NS Text"_q,
@@ -442,7 +432,7 @@ void StartFonts() {
 		u"Lucida Grande"_q,
 	};
 	QFont::insertSubstitutions(name, list);
-#endif // Q_OS_MAC
+#endif // Q_OS_MACOS
 }
 
 void DestroyFonts() {
@@ -560,12 +550,44 @@ void Font::init(
 	_data = &i->second->data;
 }
 
+QString FontData::elided(
+		const QString &str,
+		int width,
+		Qt::TextElideMode mode) const {
+	auto result = _m.elidedText(str, mode, width);
+	if (result != str) {
+		NotifyElided(str, width);
+	}
+	return result;
+}
+
 OwnedFont::OwnedFont(const QString &custom, FontFlags flags, int size)
 : _data(ResolveFont(custom, flags, size), nullptr) {
 	_font._data = &_data;
 }
 
 } // namespace internal
+
+namespace {
+
+std::atomic<ElisionObserver> ElisionObserverInstance = nullptr;
+
+} // namespace
+
+void SetElisionObserver(ElisionObserver observer) {
+	ElisionObserverInstance.store(observer, std::memory_order_release);
+}
+
+bool ElisionObserved() {
+	return ElisionObserverInstance.load(std::memory_order_acquire) != nullptr;
+}
+
+void NotifyElided(const QString &text, int width) {
+	if (const auto observer = ElisionObserverInstance.load(
+			std::memory_order_acquire)) {
+		observer(text, width);
+	}
+}
 
 const FontResolveResult *FindAdjustResult(const QFont &font) {
 	const auto key = internal::QtFontKey(font);

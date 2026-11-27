@@ -135,6 +135,13 @@ QMargins BasicWindowHelper::frameMargins() {
 	return nativeFrameMargins();
 }
 
+QRect BasicWindowHelper::fitFrameInWorkArea(
+		QRect body,
+		QRect space,
+		not_null<const QScreen*> screen) const {
+	return body;
+}
+
 int BasicWindowHelper::additionalContentPadding() const {
 	return 0;
 }
@@ -150,6 +157,11 @@ auto BasicWindowHelper::hitTestRequests() const
 
 rpl::producer<HitTestResult> BasicWindowHelper::systemButtonOver() const {
 	return rpl::never<HitTestResult>();
+}
+
+auto BasicWindowHelper::systemCommandRequests() const
+-> rpl::producer<not_null<SystemCommandRequest*>> {
+	return rpl::never<not_null<SystemCommandRequest*>>();
 }
 
 rpl::producer<HitTestResult> BasicWindowHelper::systemButtonDown() const {
@@ -505,7 +517,9 @@ RpWidget *DefaultWindowHelper::titleWidget() {
 QMargins DefaultWindowHelper::frameMargins() {
 	return _title->isHidden()
 		? BasicWindowHelper::nativeFrameMargins()
-		: QMargins{ 0, _title->height(), 0, 0 };
+		: QMargins{ 0, _title->height(), 0, 0 } + (hasShadow()
+			? QMargins()
+			: normalResizeArea());
 }
 
 bool DefaultWindowHelper::hasShadow() const {
@@ -513,9 +527,15 @@ bool DefaultWindowHelper::hasShadow() const {
 }
 
 QMargins DefaultWindowHelper::resizeArea() const {
-	if (window()->isMaximized()
-		|| window()->isFullScreen()
-		|| _title->isHidden()
+	if (window()->isMaximized() || window()->isFullScreen()) {
+		return QMargins();
+	}
+
+	return normalResizeArea();
+}
+
+QMargins DefaultWindowHelper::normalResizeArea() const {
+	if (_title->isHidden()
 		|| (!hasShadow() && !_title->controlsGeometry().height())) {
 		return QMargins();
 	}

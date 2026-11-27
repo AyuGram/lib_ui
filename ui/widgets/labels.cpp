@@ -10,6 +10,7 @@
 #include "ui/text/text_entity.h"
 #include "ui/text/text_extended_data.h"
 #include "ui/effects/animation_value.h"
+#include "ui/effects/animations.h"
 #include "ui/widgets/popup_menu.h"
 #include "ui/widgets/box_content_divider.h"
 #include "ui/basic_click_handlers.h" // UrlClickHandler
@@ -644,13 +645,13 @@ void FlatLabel::keyPressEvent(QKeyEvent *e) {
 			copySelectedText();
 			e->accept();
 		}
-#ifdef Q_OS_MAC
+#ifdef Q_OS_MACOS
 	} else if (e->key() == Qt::Key_E && e->modifiers().testFlag(Qt::ControlModifier)) {
 		auto selection = _selection.empty() ? (_contextMenu ? _savedSelection : _selection) : _selection;
 		if (!selection.empty()) {
 			TextUtilities::SetClipboardText(_text.toTextForMimeData(selection), QClipboard::FindBuffer);
 		}
-#endif // Q_OS_MAC
+#endif // Q_OS_MACOS
 	}
 }
 
@@ -885,6 +886,12 @@ void FlatLabel::executeDrag() {
 	if (auto mimeData = TextUtilities::MimeDataFromText(selectedText)) {
 		auto drag = new QDrag(window());
 		drag->setMimeData(mimeData.release());
+
+		// Running animations must keep ticking inside the drag's loop.
+		Animations::Manager::SetScheduleWithInvokeQueued(true);
+		const auto guard = gsl::finally([] {
+			Animations::Manager::SetScheduleWithInvokeQueued(false);
+		});
 		drag->exec(Qt::CopyAction);
 
 		// We don't receive mouseReleaseEvent when drag is finished.

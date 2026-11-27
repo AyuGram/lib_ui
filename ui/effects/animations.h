@@ -58,13 +58,19 @@ private:
 
 class Simple final {
 public:
+	enum class Tracking : uchar {
+		Short,
+		None,
+	};
+
 	template <typename Callback>
 	void start(
 		Callback &&callback,
 		float64 from,
 		float64 to,
 		crl::time duration,
-		anim::transition transition = anim::linear);
+		anim::transition transition = anim::linear,
+		Tracking tracking = Tracking::Short);
 	template <typename Callback>
 	void setCallback(Callback &&callback);
 	void change(
@@ -79,7 +85,7 @@ public:
 private:
 	class ShortTracker {
 	public:
-		ShortTracker() {
+		explicit ShortTracker(Tracking tracking) : _tracking(tracking) {
 			restart();
 		}
 		ShortTracker(const ShortTracker &other) = delete;
@@ -87,8 +93,18 @@ private:
 		~ShortTracker() {
 			release();
 		}
+		[[nodiscard]] Tracking tracking() const {
+			return _tracking;
+		}
+		void setTracking(Tracking tracking) {
+			_tracking = tracking;
+			if (_tracking == Tracking::None) {
+				release();
+			}
+		}
 		void restart() {
-			if (!std::exchange(_paused, true)) {
+			if (_tracking == Tracking::Short
+				&& !std::exchange(_paused, true)) {
 				style::internal::StartShortAnimation();
 			}
 		}
@@ -99,12 +115,15 @@ private:
 		}
 
 	private:
+		Tracking _tracking = Tracking::Short;
 		bool _paused = false;
 
 	};
 
 	struct Data {
-		explicit Data(float64 initial) : value(initial) {
+		Data(float64 initial, Tracking tracking)
+		: value(initial)
+		, tracker(tracking) {
 		}
 		~Data() {
 			if (markOnDelete) {
@@ -130,13 +149,13 @@ private:
 		not_null<Data*> data,
 		Callback &&callback);
 
-	void prepare(float64 from, crl::time duration);
+	void prepare(float64 from, crl::time duration, Tracking tracking);
 	void startPrepared(
 		float64 to,
 		crl::time duration,
 		anim::transition transition);
 
-	static constexpr auto kLongAnimationDuration = crl::time(1000);
+	static constexpr auto kLongAnimationDuration = crl::time(400);
 
 	mutable std::unique_ptr<Data> _data;
 
@@ -384,12 +403,13 @@ inline decltype(auto) Simple::BasicCallback(
 		auto deleted = false;
 		data->markOnDelete = &deleted;
 		const auto result = callback(data->value) && !finished;
+		if (!deleted && finished && data->finishedCallback) {
+			const auto onstack = data->finishedCallback;
+			onstack();
+		}
 		if (!deleted) {
 			data->markOnDelete = nullptr;
-			if (finished && data->finishedCallback) {
-				data->finishedCallback();
-			}
-			if (!deleted && !result) {
+			if (!result) {
 				data->tracker.release();
 			}
 		}
@@ -411,8 +431,9 @@ inline void Simple::start(
 		float64 from,
 		float64 to,
 		crl::time duration,
-		anim::transition transition) {
-	prepare(from, duration);
+		anim::transition transition,
+		Tracking tracking) {
+	prepare(from, duration, tracking);
 	setCallback(std::forward<Callback>(callback));
 	startPrepared(to, duration, transition);
 }
@@ -423,16 +444,22 @@ inline void Simple::change(
 		anim::transition transition) {
 	Expects(_data != nullptr);
 
-	prepare(0. /* ignored */, duration);
+	prepare(0. /* ignored */, duration, _data->tracker.tracking());
 	startPrepared(to, duration, transition);
 }
 
-inline void Simple::prepare(float64 from, crl::time duration) {
+inline void Simple::prepare(
+		float64 from,
+		crl::time duration,
+		Tracking tracking) {
 	const auto isLong = (duration > kLongAnimationDuration);
 	if (!_data) {
-		_data = std::make_unique<Data>(from);
-	} else if (!isLong) {
-		_data->tracker.restart();
+		_data = std::make_unique<Data>(from, tracking);
+	} else {
+		_data->tracker.setTracking(tracking);
+		if (!isLong) {
+			_data->tracker.restart();
+		}
 	}
 	if (isLong) {
 		_data->tracker.release();
