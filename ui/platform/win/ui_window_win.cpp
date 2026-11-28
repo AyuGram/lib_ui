@@ -24,11 +24,18 @@
 #include "styles/style_widgets.h"
 
 #include <QtCore/QPoint>
+#include <QtGui/QScreen>
 #include <QtGui/QWindow>
 #include <QtWidgets/QStyleFactory>
 #include <QtWidgets/QApplication>
 #include <qpa/qplatformnativeinterface.h>
 #include <qpa/qwindowsysteminterface.h>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <private/qhighdpiscaling_p.h>
+#include <qpa/qplatformscreen.h>
+#include <qpa/qplatformwindow.h>
+#include <qpa/qplatformwindow_p.h>
+#endif // Qt >= 6.0.0
 
 #include <dwmapi.h>
 #include <shellapi.h>
@@ -40,11 +47,17 @@ Q_DECLARE_METATYPE(QMargins);
 namespace Ui::Platform {
 namespace {
 
+constexpr auto kMaxGeometryDeliveries = 4;
+
 constexpr auto kDWMWCP_ROUND = DWORD(2);
 constexpr auto kDWMWCP_DONOTROUND = DWORD(1);
 constexpr auto kDWMWA_WINDOW_CORNER_PREFERENCE = DWORD(33);
 constexpr auto kDWMWA_CAPTION_COLOR = DWORD(35);
 constexpr auto kDWMWA_TEXT_COLOR = DWORD(36);
+
+// Undocumented messages of classic (unthemed) caption painting.
+constexpr auto kWM_NCUAHDRAWCAPTION = UINT(0x00AE);
+constexpr auto kWM_NCUAHDRAWFRAME = UINT(0x00AF);
 
 UINT(__stdcall *GetDpiForWindow)(_In_ HWND hwnd);
 
@@ -147,11 +160,24 @@ BOOL(__stdcall *AdjustWindowRectExForDpi)(
 	return bAutoHidden;
 }
 
-void FixAeroSnap(HWND handle) {
-	SetWindowLongPtr(
-		handle,
-		GWL_STYLE,
-		GetWindowLongPtr(handle, GWL_STYLE) | WS_CAPTION | WS_THICKFRAME);
+// Qt 6 dropped "WindowsCustomMargins" property for native interface.
+void SetCustomMargins(not_null<QWindow*> window, QMargins margins) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+	if (window->flags() & Qt::FramelessWindowHint) {
+		return; // Qt refuses custom margins on frameless windows.
+	}
+	using namespace QNativeInterface::Private;
+	if (const auto native = window->nativeInterface<QWindowsWindow>()) {
+		native->setCustomMargins(margins);
+	}
+#else // Qt >= 6.0.0
+	if (const auto native = QGuiApplication::platformNativeInterface()) {
+		native->setWindowProperty(
+			window->handle(),
+			"WindowsCustomMargins",
+			QVariant::fromValue<QMargins>(margins));
+	}
+#endif // Qt >= 6.0.0
 }
 
 [[nodiscard]] Qt::KeyboardModifiers LookupModifiers() {
@@ -176,6 +202,18 @@ void FixAeroSnap(HWND handle) {
 	return result;
 }
 
+[[nodiscard]] QSize MaximizedBorder(uint dpi) {
+	const auto metric = [&](int index) {
+		return (GetSystemMetricsForDpiSupported() && dpi)
+			? GetSystemMetricsForDpi(index, dpi)
+			: GetSystemMetrics(index);
+	};
+	const auto padding = metric(SM_CXPADDEDBORDER);
+	return QSize(
+		metric(SM_CXSIZEFRAME) + padding,
+		metric(SM_CYSIZEFRAME) + padding);
+}
+
 } // namespace
 
 WindowHelper::WindowHelper(not_null<RpWidget*> window)
@@ -183,9 +221,6 @@ WindowHelper::WindowHelper(not_null<RpWidget*> window)
 , NativeEventFilter(window)
 , _title(Ui::CreateChild<TitleWidget>(window.get()))
 , _body(Ui::CreateChild<RpWidget>(window.get())) {
-	if (!::Platform::IsWindows8OrGreater()) {
-		window->setWindowFlag(Qt::FramelessWindowHint);
-	}
 	init();
 }
 
@@ -207,6 +242,82 @@ QMargins WindowHelper::frameMargins() {
 	return _title->isHidden()
 		? BasicWindowHelper::nativeFrameMargins()
 		: QMargins{ 0, _title->height(), 0, 0 };
+}
+
+QRect WindowHelper::fitFrameInWorkArea(
+		QRect body,
+		QRect space,
+		not_null<const QScreen*> screen) const {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+	if (!_handle
+		|| (_title->isHidden()
+			? !::Platform::IsWindows11OrGreater()
+			: !nativeResize())) {
+		return body;
+	}
+	const auto platform = screen->handle();
+	const auto work = platform->availableGeometry();
+	const auto dpi = uint(qRound(platform->logicalDpi().first));
+	const auto border = int(
+		(dpi + USER_DEFAULT_SCREEN_DPI / 2) / USER_DEFAULT_SCREEN_DPI);
+	const auto title = titleHeight();
+	auto caption = 0;
+	if (_title->isHidden()) {
+		auto r = RECT();
+		const auto style = GetWindowLongPtr(_handle, GWL_STYLE);
+		const auto styleEx = GetWindowLongPtr(_handle, GWL_EXSTYLE);
+		if (!AdjustWindowRectExForDpiSupported()
+			|| !dpi
+			|| !AdjustWindowRectExForDpi(&r, style, false, styleEx, dpi)) {
+			return body;
+		}
+		caption = -r.top;
+	}
+	const auto minimum = QSize(
+		window()->minimumWidth(),
+		_minimumBodyHeight.value_or(window()->minimumHeight() - title)
+	).expandedTo({ 1, 1 });
+	const auto frame = [&](QRect rect) {
+		return QHighDpi::toNativeGlobalPosition(
+			rect.marginsAdded({ 0, title, 0, 0 }),
+			screen.get()
+		).marginsAdded({ border, caption, border, border });
+	};
+	// Qt rounds position and size apart, so step one pixel at a time.
+	auto result = body;
+	while (frame(result).left() < work.left()) {
+		result.translate(1, 0);
+	}
+	while (result.right() > space.right()
+		|| frame(result).right() > work.right()) {
+		const auto moved = result.translated(-1, 0);
+		if (moved.left() >= space.left()
+			&& frame(moved).left() >= work.left()) {
+			result = moved;
+		} else if (result.width() > minimum.width()) {
+			result.setWidth(result.width() - 1);
+		} else {
+			result = QRect(body.x(), result.y(), body.width(), result.height());
+			break;
+		}
+	}
+	while (frame(result).bottom() > work.bottom()) {
+		const auto moved = result.translated(0, -1);
+		// The caption in space is rounded, so check the native one too.
+		if (moved.top() >= space.top()
+			&& frame(moved).top() >= work.top()) {
+			result = moved;
+		} else if (result.height() > minimum.height()) {
+			result.setHeight(result.height() - 1);
+		} else {
+			result = QRect(result.x(), body.y(), result.width(), body.height());
+			break;
+		}
+	}
+	return result;
+#else // Qt >= 6.0.0
+	return body;
+#endif // Qt >= 6.0.0
 }
 
 int WindowHelper::additionalContentPadding() const {
@@ -237,12 +348,6 @@ void WindowHelper::setTitleStyle(const style::WindowTitle &st) {
 }
 
 void WindowHelper::setNativeFrame(bool enabled) {
-	if (_handle && !::Platform::IsWindows8OrGreater()) {
-		window()->windowHandle()->setFlag(Qt::FramelessWindowHint, !enabled);
-		if (!enabled) {
-			FixAeroSnap(_handle);
-		}
-	}
 	_title->setVisible(!enabled);
 	if (_handle) {
 		updateShadow();
@@ -296,10 +401,12 @@ void WindowHelper::updateCornersRounding() {
 }
 
 void WindowHelper::setMinimumSize(QSize size) {
+	_minimumBodyHeight = size.height();
 	window()->setMinimumSize(size.width(), titleHeight() + size.height());
 }
 
 void WindowHelper::setFixedSize(QSize size) {
+	_minimumBodyHeight = _maximumBodyHeight = size.height();
 	window()->setFixedSize(size.width(), titleHeight() + size.height());
 	_title->setResizeEnabled(false);
 	if (_shadow) {
@@ -308,6 +415,29 @@ void WindowHelper::setFixedSize(QSize size) {
 }
 
 void WindowHelper::setGeometry(QRect rect) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+	if (_handle
+		&& !_isFullScreen
+		&& !IsZoomed(_handle)
+		&& !IsIconic(_handle)
+		&& ((window()->maximumWidth() == QWIDGETSIZE_MAX
+				&& window()->maximumHeight() == QWIDGETSIZE_MAX)
+			|| nativeMoveExclusive(rect))) {
+		if (const auto cloaked = cloakForPlacement()) {
+			const auto held = std::exchange(
+				_cloakedForPlacement,
+				_cloakedForPlacement || !window()->isHidden());
+			const auto guard = gsl::finally([&] {
+				_cloakedForPlacement = held;
+				if (*cloaked) {
+					updateCloaking();
+				}
+			});
+			window()->setGeometry(moveNativeWindow(rect));
+			return;
+		}
+	}
+#endif // Qt >= 6.0.0
 	SetGeometryAndScreen(
 		window(),
 		rect.marginsAdded({ 0, titleHeight(), 0, 0 }));
@@ -316,7 +446,6 @@ void WindowHelper::setGeometry(QRect rect) {
 void WindowHelper::showFullScreen() {
 	if (!_isFullScreen) {
 		_isFullScreen = true;
-		updateMargins();
 		updateCornersRounding();
 		updateCloaking();
 	}
@@ -346,6 +475,11 @@ rpl::producer<HitTestResult> WindowHelper::systemButtonDown() const {
 	return _systemButtonDown.events();
 }
 
+auto WindowHelper::systemCommandRequests() const
+-> rpl::producer<not_null<SystemCommandRequest*>> {
+	return _systemCommandRequests.events();
+}
+
 void WindowHelper::overrideSystemButtonOver(HitTestResult button) {
 	_systemButtonOver.fire_copy(button);
 }
@@ -359,14 +493,6 @@ void WindowHelper::init() {
 
 	window()->winIdValue() | rpl::on_next([=](WId winId) {
 		_handle = reinterpret_cast<HWND>(winId);
-
-		if (!::Platform::IsWindows8OrGreater()) {
-			const auto native = _title->isHidden();
-			window()->setWindowFlag(Qt::FramelessWindowHint, !native);
-			if (_handle && !native) {
-				FixAeroSnap(_handle);
-			}
-		}
 
 		if (_handle) {
 			_dpi = GetDpiForWindowSupported()
@@ -391,6 +517,22 @@ void WindowHelper::init() {
 		Ui::ForceFullRepaint(window());
 	}, window()->lifetime());
 
+	const auto queueSizeConstraintsUpdate = [=] {
+		InvokeQueued(_title, [=] {
+			if (_title->isHidden() || (_handle && IsIconic(_handle))) {
+				return;
+			}
+			const auto qwindow = window()->windowHandle();
+			// Wait for QWidget to receive the native size before changing limits.
+			if (!window()->isHidden()
+				&& qwindow
+				&& window()->size() != qwindow->size()) {
+				return;
+			}
+			updateSizeConstraints();
+		});
+	};
+
 	rpl::combine(
 		window()->sizeValue(),
 		_title->heightValue(),
@@ -404,6 +546,9 @@ void WindowHelper::init() {
 			titleShown ? titleHeight : 0,
 			size.width(),
 			size.height() - (titleShown ? titleHeight : 0));
+		if (titleShown) {
+			queueSizeConstraintsUpdate();
+		}
 	}, _body->lifetime());
 
 	_dpi.value() | rpl::on_next([=](uint dpi) {
@@ -429,6 +574,7 @@ void WindowHelper::init() {
 				_isMaximizedAndTranslucent = is;
 				updateCornersRounding();
 			}
+			queueSizeConstraintsUpdate();
 		}
 	};
 	Ui::Connect(
@@ -458,6 +604,26 @@ bool WindowHelper::filterNativeEvent(
 
 	switch (msg) {
 
+	case WM_SYSCOMMAND: {
+		// Win+Up / system menu arrive here before any state change,
+		// so window may replace maximize / restore with its own behavior.
+		const auto command = (wParam & 0xFFF0);
+		if ((command != SC_MAXIMIZE && command != SC_RESTORE)
+			|| IsIconic(_handle)) {
+			return false;
+		}
+		auto request = SystemCommandRequest{
+			.command = (command == SC_MAXIMIZE)
+				? SystemCommand::Maximize
+				: SystemCommand::Restore,
+		};
+		_systemCommandRequests.fire(&request);
+		if (!request.handled) {
+			return false;
+		}
+		if (result) *result = 0;
+	} return true;
+
 	case WM_ACTIVATE: {
 		if (LOWORD(wParam) == WA_CLICKACTIVE) {
 			Ui::MarkInactivePress(window(), true);
@@ -482,9 +648,42 @@ bool WindowHelper::filterNativeEvent(
 		if (result) *result = 0;
 	} return true;
 
-	case WM_NCCALCSIZE: {
-		if (_title->isHidden() || window()->isFullScreen() || !wParam) {
+	case WM_SETTEXT:
+	case WM_SETICON: {
+		if (::Platform::IsWindows8OrGreater() || _title->isHidden()) {
 			return false;
+		}
+		// Classic caption painter reacts to these bypassing WM_NCPAINT,
+		// so hide the window from it while DefWindowProc stores the value.
+		const auto style = GetWindowLongPtr(_handle, GWL_STYLE);
+		SetWindowLongPtr(_handle, GWL_STYLE, style & ~WS_VISIBLE);
+		const auto res = DefWindowProc(_handle, msg, wParam, lParam);
+		SetWindowLongPtr(_handle, GWL_STYLE, style);
+		if (result) *result = res;
+	} return true;
+
+	case kWM_NCUAHDRAWCAPTION:
+	case kWM_NCUAHDRAWFRAME: {
+		if (::Platform::IsWindows8OrGreater() || _title->isHidden()) {
+			return false;
+		}
+		if (result) *result = 0;
+	} return true;
+
+	case WM_NCCALCSIZE: {
+		if (_title->isHidden() || !wParam) {
+			return false;
+		}
+		const auto style = GetWindowLongPtr(_handle, GWL_STYLE);
+		const auto fullscreen = (style & WS_POPUP)
+			&& !(style & (WS_DLGFRAME | WS_THICKFRAME));
+		if (fullscreen) {
+			// Whole window is client, and Qt must not apply custom
+			// margins of normal state (they stay set in full screen).
+			if (result) {
+				*result = 0;
+			}
+			return true;
 		}
 		const auto r = &((LPNCCALCSIZE_PARAMS)lParam)->rgrc[0];
 		const auto maximized = [&] {
@@ -495,23 +694,13 @@ bool WindowHelper::filterNativeEvent(
 		}();
 		const auto addBorders = maximized || nativeResize();
 		if (addBorders) {
-			const auto dpi = _dpi.current();
-			const auto borderWidth = (GetSystemMetricsForDpiSupported() && dpi)
-				? GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi)
-					+ GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi)
-				: GetSystemMetrics(SM_CXSIZEFRAME)
-					+ GetSystemMetrics(SM_CXPADDEDBORDER);
-			const auto borderHeight = (GetSystemMetricsForDpiSupported() && dpi)
-				? GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi)
-					+ GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi)
-				: GetSystemMetrics(SM_CYSIZEFRAME)
-					+ GetSystemMetrics(SM_CXPADDEDBORDER);
-			r->left += borderWidth;
-			r->right -= borderWidth;
+			const auto border = MaximizedBorder(_dpi.current());
+			r->left += border.width();
+			r->right -= border.width();
 			if (maximized) {
-				r->top += borderHeight;
+				r->top += border.height();
 			}
-			r->bottom -= borderHeight;
+			r->bottom -= border.height();
 		}
 		if (maximized) {
 			const auto hMonitor = MonitorFromWindow(
@@ -549,7 +738,11 @@ bool WindowHelper::filterNativeEvent(
 		if (_title->isHidden()) {
 			return false;
 		}
-		if (IsCompositionEnabled()) {
+		// DWM doesn't manage frames of layered windows, so themed caption
+		// painter ignores lParam == -1 and flashes native caption for a frame.
+		const auto layered = GetWindowLongPtr(_handle, GWL_EXSTYLE)
+			& WS_EX_LAYERED;
+		if (IsCompositionEnabled() && !layered) {
 			const auto res = DefWindowProc(_handle, msg, wParam, -1);
 			if (result) *result = res;
 		} else {
@@ -784,7 +977,6 @@ bool WindowHelper::nativeResize() const {
 	if (::Platform::IsWindows11OrGreater()) {
 		switch (window()->windowHandle()->surfaceType()) {
 		case QSurface::RasterSurface:
-		case QSurface::RasterGLSurface:
 			return window()->windowHandle()->format().alphaBufferSize() <= 0;
 		}
 
@@ -826,7 +1018,8 @@ void WindowHelper::updateCloaking() {
 	if (!_handle) {
 		return;
 	}
-	const auto enabled = window()->isHidden() && !_isFullScreen;
+	const auto enabled = _cloakedForPlacement
+		|| (window()->isHidden() && !_isFullScreen);
 	const auto flag = BOOL(enabled ? TRUE : FALSE);
 	DwmSetWindowAttribute(_handle, DWMWA_CLOAK, &flag, sizeof(flag));
 }
@@ -852,8 +1045,35 @@ void WindowHelper::enableCloakingForHidden() {
 	*firstExposeFilter = base::install_event_filter(qwindow, filter);
 }
 
+std::optional<bool> WindowHelper::cloakForPlacement() {
+	if (window()->isHidden() || _cloakedForPlacement) {
+		return false;
+	}
+	auto cloaked = DWORD();
+	if (DwmGetWindowAttribute(
+			_handle,
+			DWMWA_CLOAKED,
+			&cloaked,
+			sizeof(cloaked)) != S_OK) {
+		return std::nullopt;
+	} else if (cloaked & DWM_CLOAKED_APP) {
+		return false;
+	}
+	const auto flag = BOOL(TRUE);
+	if (DwmSetWindowAttribute(
+			_handle,
+			DWMWA_CLOAK,
+			&flag,
+			sizeof(flag)) != S_OK) {
+		return std::nullopt;
+	}
+	return true;
+}
+
 void WindowHelper::updateMargins() {
-	if (!_handle || _updatingMargins) {
+	// Full screen keeps margins of normal state, each change makes Qt
+	// resize frame and breaks geometry restored after full screen.
+	if (!_handle || _updatingMargins || _isFullScreen) {
 		return;
 	}
 
@@ -872,6 +1092,7 @@ void WindowHelper::updateMargins() {
 	auto margins = nativeResize()
 		? QMargins(0, r.top, 0, 0)
 		: QMargins(r.left, r.top, -r.right, -r.bottom);
+	_rcWorkDelta = QMargins();
 	if (style & WS_MAXIMIZE) {
 		RECT w, m;
 		GetWindowRect(_handle , &w);
@@ -885,46 +1106,65 @@ void WindowHelper::updateMargins() {
 			m = mi.rcWork;
 		}
 
-		_marginsDelta = QMargins(
+		_rcWorkDelta = QMargins(
 			w.left - m.left,
 			w.top - m.top,
 			m.right - w.right,
 			m.bottom - w.bottom);
 
-		margins.setLeft(margins.left() - _marginsDelta.left());
-		margins.setRight(margins.right() - _marginsDelta.right());
-		margins.setBottom(margins.bottom() - _marginsDelta.bottom());
-		margins.setTop(margins.top() - _marginsDelta.top());
-	} else if (!_marginsDelta.isNull()) {
-		RECT w;
-		GetWindowRect(_handle, &w);
-		SetWindowPos(
-			_handle,
-			0,
-			0,
-			0,
-			w.right - w.left - _marginsDelta.left() - _marginsDelta.right(),
-			w.bottom - w.top - _marginsDelta.top() - _marginsDelta.bottom(),
-			(SWP_NOMOVE
-				| SWP_NOSENDCHANGING
-				| SWP_NOZORDER
-				| SWP_NOACTIVATE
-				| SWP_NOREPOSITION));
+		// A moved or resized window stays maximized without filling the area.
+		const auto border = MaximizedBorder(dpi);
+		const auto fills = [](int delta, int border) {
+			return (delta <= 0) && (delta >= -border);
+		};
+		const auto filling = (style & WS_MINIMIZE)
+			|| (fills(_rcWorkDelta.left(), border.width())
+				&& fills(_rcWorkDelta.top(), border.height())
+				&& fills(_rcWorkDelta.right(), border.width())
+				&& fills(_rcWorkDelta.bottom(), border.height()));
+		if (!filling) {
+			_rcWorkDelta = QMargins(
+				-border.width(),
+				-border.height(),
+				-border.width(),
+				-border.height());
+		}
+
+		_marginsDelta = _rcWorkDelta;
+
+		// With native borders Qt already measures maximized frame itself,
+		// shifting custom margins here made it 16px wider than client.
+		if (!nativeResize()) {
+			margins.setLeft(margins.left() - _rcWorkDelta.left());
+			margins.setRight(margins.right() - _rcWorkDelta.right());
+			margins.setBottom(margins.bottom() - _rcWorkDelta.bottom());
+			margins.setTop(margins.top() - _rcWorkDelta.top());
+		}
+	} else if (!_isFullScreen && !_marginsDelta.isNull()) {
+		if (!nativeResize()) {
+			RECT w;
+			GetWindowRect(_handle, &w);
+			SetWindowPos(
+				_handle,
+				0,
+				0,
+				0,
+				w.right - w.left - _marginsDelta.left() - _marginsDelta.right(),
+				w.bottom - w.top - _marginsDelta.top() - _marginsDelta.bottom(),
+				(SWP_NOMOVE
+					| SWP_NOSENDCHANGING
+					| SWP_NOZORDER
+					| SWP_NOACTIVATE
+					| SWP_NOREPOSITION));
+		}
 		_marginsDelta = QMargins();
 	}
 
-	if (_isFullScreen || _title->isHidden()) {
+	if (_title->isHidden()) {
 		margins = QMargins();
-		if (_title->isHidden()) {
-			_marginsDelta = QMargins();
-		}
+		_marginsDelta = QMargins();
 	}
-	if (const auto native = QGuiApplication::platformNativeInterface()) {
-		native->setWindowProperty(
-			window()->windowHandle()->handle(),
-			"WindowsCustomMargins",
-			QVariant::fromValue<QMargins>(margins));
-	}
+	SetCustomMargins(window()->windowHandle(), margins);
 }
 
 void WindowHelper::fixMaximizedWindow() {
@@ -945,12 +1185,267 @@ void WindowHelper::fixMaximizedWindow() {
 				0,
 				0,
 				0,
-				m.right - m.left - _marginsDelta.left() - _marginsDelta.right(),
-				m.bottom - m.top - _marginsDelta.top() - _marginsDelta.bottom(),
+				m.right - m.left - _rcWorkDelta.left() - _rcWorkDelta.right(),
+				m.bottom - m.top - _rcWorkDelta.top() - _rcWorkDelta.bottom(),
 				SWP_NOMOVE | SWP_NOSENDCHANGING | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREPOSITION);
 		}
 	}
 }
+
+void WindowHelper::updateSizeConstraints() {
+	const auto title = titleHeight();
+	if (_minimumBodyHeight) {
+		window()->setMinimumHeight(title + *_minimumBodyHeight);
+	}
+	if (_maximumBodyHeight) {
+		window()->setMaximumHeight(title + *_maximumBodyHeight);
+	}
+}
+
+QRect WindowHelper::moveNativeWindow(QRect rect) {
+	const auto qwindow = window()->windowHandle();
+	const auto dpi = [&] {
+		return GetDpiForWindowSupported()
+			? GetDpiForWindow(_handle)
+			: _dpi.current();
+	};
+	const auto constrained = [&](QRect geometry) {
+		const auto limited = geometry.size().boundedTo(window()->maximumSize());
+		const auto size = limited.expandedTo(window()->minimumSize());
+		return QRect(geometry.topLeft(), size);
+	};
+	auto fallback = std::optional<QRect>();
+	const auto request = [&] {
+		const auto body = fallback.value_or(rect);
+		return constrained(body.marginsAdded({ 0, titleHeight(), 0, 0 }));
+	};
+	updateSizeConstraints();
+	auto visited = base::flat_set<uint>{ dpi() };
+	// A move that changes the DPI keeps the old margins, so move again.
+	for (auto i = 0; i != kMaxGeometryDeliveries; ++i) {
+		const auto was = dpi();
+		const auto delivered = request();
+		qwindow->setGeometry(delivered);
+		updateSizeConstraints();
+		const auto now = dpi();
+		const auto actual = qwindow->geometry();
+		const auto left = kMaxGeometryDeliveries - i - (fallback ? 1 : 2);
+		if (now == was && actual == request()) {
+			break;
+		} else if (left > 0
+			&& (now == was
+				? (delivered != request())
+				: visited.emplace(now).second)) {
+			continue;
+		} else if (actual == constrained(actual)) {
+			break;
+		} else if (!fallback) {
+			fallback = constrained(actual).marginsRemoved(
+				{ 0, titleHeight(), 0, 0 });
+		}
+	}
+	return qwindow->geometry();
+}
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+bool WindowHelper::nativeMoveExclusive(QRect rect) const {
+	const auto qwindow = window()->windowHandle();
+	const auto current = qwindow->screen();
+	auto frame = RECT();
+	if (!current
+		|| !_marginsDelta.isNull()
+		|| window()->hasHeightForWidth()
+		|| window()->minimumSize().isEmpty()
+		|| rect.height() > QWIDGETSIZE_MAX
+		|| !AdjustWindowRectExForDpiSupported()
+		|| !GetDpiForWindowSupported()
+		|| !GetWindowRect(_handle, &frame)) {
+		return false;
+	}
+	const auto visible = !window()->isHidden();
+	const auto size = window()->size();
+	if (visible) {
+		const auto title = titleHeight();
+		auto lower = window()->minimumSize();
+		auto upper = window()->maximumSize();
+		if (_minimumBodyHeight
+			&& lower.height() != title + *_minimumBodyHeight) {
+			lower.setHeight(title + *_minimumBodyHeight);
+			if (size.expandedTo(lower) != size) {
+				return false;
+			}
+		}
+		if (_maximumBodyHeight
+			&& upper.height() != title + *_maximumBodyHeight) {
+			upper.setHeight(title + *_maximumBodyHeight);
+			const auto bounded = size.boundedTo(upper);
+			if (bounded != size && bounded.expandedTo(lower) != size) {
+				return false;
+			}
+		}
+	}
+	const auto client = qwindow->handle()->geometry();
+	const auto measured = QMargins(
+		client.x() - frame.left,
+		client.y() - frame.top,
+		frame.right - client.x() - client.width(),
+		frame.bottom - client.y() - client.height());
+	if (measured.left() < 0 || measured.top() < 0) {
+		return false;
+	}
+	const auto screens = current->virtualSiblings();
+	auto dpis = base::flat_set<uint>{
+		GetDpiForWindow(_handle),
+		_dpi.current(),
+	};
+	for (const auto sibling : screens) {
+		if (sibling->devicePixelRatio() < 1.) {
+			return false;
+		}
+		dpis.emplace(uint(qRound(sibling->handle()->logicalDpi().first)));
+	}
+	const auto shown = !_title->isHidden();
+	const auto custom = [&](QMargins system) {
+		return !shown
+			? QMargins()
+			: nativeResize()
+			? QMargins(0, -system.top(), 0, 0)
+			: -system;
+	};
+	const auto sum = [](QMargins margins) {
+		return QSize(
+			margins.left() + margins.right(),
+			margins.top() + margins.bottom());
+	};
+	const auto style = GetWindowLongPtr(_handle, GWL_STYLE);
+	const auto styleEx = GetWindowLongPtr(_handle, GWL_EXSTYLE);
+	auto systems = std::vector<QMargins>();
+	auto padding = 0;
+	for (const auto dpi : dpis) {
+		auto r = RECT();
+		if (!dpi || !AdjustWindowRectExForDpi(&r, style, false, styleEx, dpi)) {
+			return false;
+		}
+		systems.emplace_back(-r.left, -r.top, r.right, r.bottom);
+		padding = std::max(padding, int(dpi / USER_DEFAULT_SCREEN_DPI) + 1);
+	}
+	auto leading = QSize(measured.left(), measured.top());
+	auto nearest = leading;
+	auto trailing = QSize(measured.right(), measured.bottom());
+	auto most = sum(measured);
+	auto least = most;
+	for (const auto &system : systems) {
+		const auto full = system + custom(system);
+		const auto start = QSize(full.left(), full.top());
+		leading = leading.expandedTo(start);
+		nearest = nearest.boundedTo(start);
+		trailing = trailing.expandedTo(QSize(full.right(), full.bottom()));
+		for (const auto &other : systems) {
+			const auto mixed = sum(system + custom(other));
+			most = most.expandedTo(mixed);
+			least = least.boundedTo(mixed);
+		}
+	}
+	const auto low = shown ? _title->st()->height : 0;
+	const auto high = (shown && CheckTitlePaddingRequired())
+		? std::max(titleHeight(), low + padding)
+		: titleHeight();
+	const auto maximum = [&](int title) {
+		return QSize(
+			window()->maximumWidth(),
+			(_maximumBodyHeight
+				? (title + *_maximumBodyHeight)
+				: window()->maximumHeight()));
+	};
+	const auto minimum = [&](int title) {
+		return QSize(
+			window()->minimumWidth(),
+			(_minimumBodyHeight
+				? (title + *_minimumBodyHeight)
+				: window()->minimumHeight()));
+	};
+	const auto request = [&](int title) {
+		return QSize(rect.width(), rect.height() + title)
+			.boundedTo(maximum(title))
+			.expandedTo(minimum(title));
+	};
+	const auto lowest = request(low);
+	const auto largest = request(high);
+	const auto center = [](int64 edge, int length) {
+		return (edge * 2 + length - 1) / 2;
+	};
+	const auto centerX = center(rect.x(), largest.width());
+	const auto centerTop = center(int64(rect.y()) - high, lowest.height());
+	const auto centerBottom = center(int64(rect.y()) - low, largest.height());
+	auto screen = (QScreen*)nullptr;
+	for (const auto sibling : screens) {
+		const auto area = sibling->geometry();
+		if (centerX < area.left()
+			|| centerX > area.right()
+			|| centerBottom < area.top()
+			|| centerTop > area.bottom()) {
+			continue;
+		} else if (screen
+			|| centerTop < area.top()
+			|| centerBottom > area.bottom()) {
+			return false;
+		}
+		screen = sibling;
+	}
+	if (!screen) {
+		return false;
+	}
+	const auto corner = [&](int title) {
+		return QHighDpi::toNativeGlobalPosition(
+			QPoint(rect.x(), rect.y() - title),
+			screen);
+	};
+	const auto resizes = visible && (high > low);
+	const auto slack = resizes
+		? (int(std::ceil(screen->devicePixelRatio())) - 1)
+		: 0;
+	const auto extra = resizes
+		? (most + most - least + QSize(slack * 2, slack * 2))
+		: (trailing + most - least);
+	auto target = QHighDpi::toNativePixels(largest, screen)
+		.expandedTo(QHighDpi::toNativePixels(minimum(high), current));
+	auto shortest = QHighDpi::toNativePixels(lowest, screen)
+		.boundedTo(QHighDpi::toNativePixels(lowest, current));
+	if (resizes) {
+		shortest = shortest.boundedTo(
+			QHighDpi::toNativePixels(minimum(low), screen));
+		if ((_minimumBodyHeight && size.expandedTo(minimum(high)) != size)
+			|| (_maximumBodyHeight
+				&& size.boundedTo(maximum(low)) != size)) {
+			target = target.expandedTo(
+				QHighDpi::toNativePixels(size, screen));
+		}
+	}
+	const auto sizes = target + extra;
+	const auto reach = shortest + least;
+	const auto from = corner(high)
+		- QPoint(leading.width() + slack, leading.height() + slack);
+	const auto till = corner(low) + QPoint(sizes.width(), sizes.height());
+	const auto last = corner(low)
+		+ QPoint(slack - nearest.width(), slack - nearest.height());
+	const auto monitor = screen->handle()->geometry();
+	if (reach.isEmpty()
+		|| last.x() > monitor.right()
+		|| last.y() > monitor.bottom()
+		|| from.x() + reach.width() <= monitor.left()
+		|| from.y() + reach.height() <= monitor.top()) {
+		return false;
+	}
+	const auto envelope = QRect(from, till - QPoint(1, 1));
+	for (const auto sibling : screens) {
+		if (sibling != screen
+			&& sibling->handle()->geometry().intersects(envelope)) {
+			return false;
+		}
+	}
+	return true;
+}
+#endif // Qt >= 6.0.0
 
 HWND GetCurrentHandle(not_null<QWidget*> widget) {
 	const auto toplevel = widget->window();

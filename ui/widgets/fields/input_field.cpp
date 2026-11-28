@@ -25,6 +25,7 @@
 #include "ui/painter.h"
 #include "ui/qt_object_factory.h"
 #include "ui/integration.h"
+#include "ui/screen_reader_mode.h"
 #include "styles/style_widgets.h"
 #include "styles/palette.h"
 
@@ -1527,6 +1528,71 @@ bool WasInsertTillTheEndOfTag(
 	return true;
 }
 
+struct FragmentState {
+	not_null<const QTextDocument*> document;
+	QTextBlock block;
+	QTextBlock::iterator i;
+};
+
+[[nodiscard]] FragmentState FragmentStateAt(
+		not_null<const QTextDocument*> document,
+		int position) {
+	auto state = FragmentState{ document, document->findBlock(position) };
+	if (state.block != document->end()) {
+		state.i = state.block.begin();
+	}
+	return state;
+}
+
+bool SkipInvalidFragments(FragmentState &state) {
+	const auto document = state.document;
+	if (state.block == document->end()) {
+		return false;
+	}
+	while (state.i.atEnd()) {
+		state.block = state.block.next();
+		if (state.block == document->end()) {
+			return false;
+		}
+		state.i = state.block.begin();
+	}
+	return true;
+}
+
+void MoveToNextFragment(FragmentState &state) {
+	const auto document = state.document;
+	Expects(state.block != document->end());
+	Expects(!state.i.atEnd());
+
+	++state.i;
+}
+
+bool MoveToPreviousFragment(FragmentState &state) {
+	const auto document = state.document;
+	Expects(state.block != document->end());
+	Expects(!state.i.atEnd());
+
+	while (state.i == state.block.begin()) {
+		if (state.block == document->begin()) {
+			state.block = document->end();
+			return false;
+		}
+		state.block = state.block.previous();
+		state.i = state.block.end();
+	}
+	--state.i;
+	return true;
+}
+
+[[nodiscard]] int FragmentStart(const FragmentState &state) {
+	return state.i.fragment().position();
+}
+
+[[nodiscard]] int FragmentEnd(const FragmentState &state) {
+	const auto fragment = state.i.fragment();
+	return fragment.position() + fragment.length();
+}
+
 struct FormattingAction {
 	enum class Type {
 		Invalid,
@@ -1889,7 +1955,7 @@ InputField::InputField(
 	nullptr,
 	nullptr,
 	Qt::WidgetShortcut) {
-#ifdef Q_OS_MAC
+#ifdef Q_OS_MACOS
 	_systemTextReplaces = std::make_unique<SystemTextReplaces>();
 #endif
 	_inner->setDocument(CreateChild<InputDocument>(_inner.get(), _st));
@@ -2155,12 +2221,25 @@ bool InputField::viewportEventInner(QEvent *e) {
 	return _inner->QTextEdit::viewportEvent(e);
 }
 
-void InputField::updatePalette() {
+void InputField::applyPaletteColors(bool onlyIfChanged) {
+	const auto text = _st.textFg->c;
+	const auto highlight = st::msgInBgSelected->c;
+	const auto highlighted = st::historyTextInFgSelected->c;
 	auto p = _inner->palette();
-	p.setColor(QPalette::Text, _st.textFg->c);
-	p.setColor(QPalette::Highlight, st::msgInBgSelected->c);
-	p.setColor(QPalette::HighlightedText, st::historyTextInFgSelected->c);
+	if (onlyIfChanged
+		&& p.color(QPalette::Text) == text
+		&& p.color(QPalette::Highlight) == highlight
+		&& p.color(QPalette::HighlightedText) == highlighted) {
+		return;
+	}
+	p.setColor(QPalette::Text, text);
+	p.setColor(QPalette::Highlight, highlight);
+	p.setColor(QPalette::HighlightedText, highlighted);
 	_inner->setPalette(p);
+}
+
+void InputField::updatePalette() {
+	applyPaletteColors(false);
 
 	_defaultCharFormat.merge(PrepareTagFormat(
 		_st,
@@ -2327,6 +2406,7 @@ void InputField::customEmojiRepaint() {
 }
 
 void InputField::paintEventInner(QPaintEvent *e) {
+	applyPaletteColors(true);
 	_customEmojiRepaintScheduled = false;
 	paintQuotes(e);
 	_inner->QTextEdit::paintEvent(e);
@@ -2928,9 +3008,10 @@ void InputField::paintEvent(QPaintEvent *e) {
 		p.setClipRect(r);
 
 		auto placeholderTop = anim::interpolate(0, _st.placeholderShift, placeholderShiftDegree);
+		auto placeholderLeft = anim::interpolate(0, _st.placeholderShiftLeft, placeholderShiftDegree);
 
 		QRect r(rect().marginsRemoved(margins));
-		r.moveTop(r.top() + placeholderTop);
+		r.translate(placeholderLeft, placeholderTop);
 		if (style::RightToLeft()) r.moveLeft(width() - r.left() - r.width());
 
 		auto placeholderScale = 1. - (1. - _st.placeholderScale) * placeholderShiftDegree;
@@ -3537,7 +3618,10 @@ void InputField::performUndoRedo(bool redo) {
 	checkContentHeight();
 }
 
-void InputField::processFormatting(int insertPosition, int insertEnd) {
+void InputField::processFormatting(
+		int insertPosition,
+		int insertEnd,
+		bool exact) {
 	// First tag handling (the one we inserted text to).
 	bool startTagFound = false;
 	bool breakTagOnNotLetter = false;
@@ -3557,6 +3641,7 @@ void InputField::processFormatting(int insertPosition, int insertEnd) {
 		_insertedTagsReplace,
 		_instantViewEditorTagsEnabled,
 		insertedTagsProcessor);
+	const auto decodePairs = exact && (breakTagOnNotLetterTill == insertEnd);
 	using ActionType = FormattingAction::Type;
 	while (true) {
 		FormattingAction action;
@@ -3720,13 +3805,18 @@ void InputField::processFormatting(int insertPosition, int insertEnd) {
 							action.intervalStart = fragmentPosition + (ch - textStart);
 							action.intervalEnd = action.intervalStart + emojiLength;
 						}
-						if (emojiLength > 1) {
-							_emojiSurrogateAmount += emojiLength - 1;
-						}
 						break;
 					}
 
-					if (breakTagOnNotLetter && !ch->isLetterOrNumber()) {
+					const auto surrogatePair = (ch + 1 < textEnd)
+						&& ch->isHighSurrogate()
+						&& (ch + 1)->isLowSurrogate();
+					const auto insertedPair = surrogatePair
+						&& (fragmentPosition + (ch - textStart) + 1 < insertEnd);
+					if (breakTagOnNotLetter
+						&& !QChar::isLetterOrNumber((decodePairs && insertedPair)
+							? QChar::surrogateToUcs4(*ch, *(ch + 1))
+							: ch->unicode())) {
 						// Remove tag name till the end if no current action is prepared.
 						if (action.type != ActionType::Invalid) {
 							break;
@@ -3739,7 +3829,7 @@ void InputField::processFormatting(int insertPosition, int insertEnd) {
 							break;
 						}
 					}
-					if (ch + 1 < textEnd && ch->isHighSurrogate() && (ch + 1)->isLowSurrogate()) {
+					if (surrogatePair) {
 						++ch;
 					}
 				}
@@ -3935,6 +4025,8 @@ void InputField::documentContentsChanged(
 	if (_correcting) {
 		return;
 	}
+	const auto rawPosition = position;
+	const auto rawInserted = charsRemoved ? 0 : charsAdded;
 	// In case of input method events Qt emits
 	// document content change signals for a whole
 	// text block where the even took place.
@@ -3973,18 +4065,26 @@ void InputField::documentContentsChanged(
 		? _realCharsAdded
 		: charsAdded;
 
+	auto publish = true;
 	if (!_performingUndoRedo) {
+		const auto uncorrected = document->toRawText();
 		_correcting = true;
 		QTextCursor(document).joinPreviousEditBlock();
 
+		const auto countBefore = document->characterCount();
 		chopByMaxLength(insertPosition, insertLength);
+		const auto chopped = countBefore - document->characterCount();
 		const auto inserted = (_maxLength > 0)
 			? (std::max(
 				std::min(insertPosition + insertLength, _maxLength),
 				insertPosition) - insertPosition)
 			: insertLength;
+		const auto exact = (rawInserted > 0) && (insertLength == rawInserted)
+			&& (insertPosition == rawPosition)
+			&& (rawInserted <= countBefore - 1 - rawPosition)
+			&& (inserted == std::max(rawInserted - chopped, 0));
 		const auto pageSize = document->pageSize();
-		processFormatting(insertPosition, insertPosition + inserted);
+		processFormatting(insertPosition, insertPosition + inserted, exact);
 		if (document->pageSize() != pageSize) {
 			document->setPageSize(pageSize);
 		}
@@ -3994,6 +4094,12 @@ void InputField::documentContentsChanged(
 		updateRootFrameFormat();
 		_correcting = false;
 		QTextCursor(document).endEditBlock();
+		publish = ContentsChange::Compose(
+			uncorrected,
+			document->toRawText(),
+			position,
+			charsRemoved,
+			charsAdded);
 	}
 
 	if (_formattingCursorUpdate) {
@@ -4002,9 +4108,9 @@ void InputField::documentContentsChanged(
 	}
 
 	handleContentsChanged();
-	const auto added = charsAdded - _emojiSurrogateAmount;
-	_documentContentsChanges.fire({ position, charsRemoved, added });
-	_emojiSurrogateAmount = 0;
+	if (publish) {
+		_documentContentsChanges.fire({ position, charsRemoved, charsAdded });
+	}
 }
 
 void InputField::updateRootFrameFormat() {
@@ -4267,6 +4373,8 @@ void InputField::setTextWithTags(
 	_insertedTagsAreFromMime = false;
 	_realInsertPosition = 0;
 	_realCharsAdded = prepared.text.size();
+	// The whole text is replaced, so old block formats (quotes) must not survive.
+	_insertedTagsReplace = true;
 	const auto document = _inner->document();
 	auto cursor = QTextCursor(document);
 	if (historyAction == HistoryAction::Clear) {
@@ -4288,6 +4396,7 @@ void InputField::setTextWithTags(
 	if (historyAction == HistoryAction::Clear) {
 		document->setUndoRedoEnabled(true);
 	}
+	_insertedTagsReplace = false;
 	_insertedTags.clear();
 	_realInsertPosition = -1;
 	finishAnimating();
@@ -4523,7 +4632,10 @@ void InputField::keyPressEventInner(QKeyEvent *e) {
 			e->ignore();
 		} else {
 			const auto forward = (key == Qt::Key_Tab) && !shift;
-			auto request = TabbedRequest{ .backward = !forward };
+			auto request = TabbedRequest{
+				.backward = !forward,
+				.defaultOrder = ScreenReaderModeActive(),
+			};
 			_tabbed.fire(&request);
 			if (!request.handled && !focusNextPrevChild(forward)) {
 				e->ignore();
@@ -4539,7 +4651,7 @@ void InputField::keyPressEventInner(QKeyEvent *e) {
 			|| key == Qt::Key_PageUp
 			|| key == Qt::Key_PageDown)) {
 		e->ignore();
-#ifdef Q_OS_MAC
+#ifdef Q_OS_MACOS
 	} else if (key == Qt::Key_E && e->modifiers().testFlag(Qt::ControlModifier)) {
 		const auto cursor = textCursor();
 		const auto start = cursor.selectionStart();
@@ -4549,7 +4661,7 @@ void InputField::keyPressEventInner(QKeyEvent *e) {
 				getTextWithTagsPart(start, end).text,
 				QClipboard::FindBuffer);
 		}
-#endif // Q_OS_MAC
+#endif // Q_OS_MACOS
 	} else {
 		const auto text = e->text();
 		auto cursor = textCursor();
@@ -4733,68 +4845,19 @@ auto InputField::selectionEditLinkData(EditLinkSelection selection) const
 	}
 	Assert(!link.isEmpty());
 
-	struct State {
-		QTextBlock block;
-		QTextBlock::iterator i;
-	};
-	const auto document = _inner->document();
-	const auto skipInvalid = [&](State &state) {
-		if (state.block == document->end()) {
-			return false;
-		}
-		while (state.i.atEnd()) {
-			state.block = state.block.next();
-			if (state.block == document->end()) {
-				return false;
-			}
-			state.i = state.block.begin();
-		}
-		return true;
-	};
-	const auto moveToNext = [&](State &state) {
-		Expects(state.block != document->end());
-		Expects(!state.i.atEnd());
-
-		++state.i;
-	};
-	const auto moveToPrevious = [&](State &state) {
-		Expects(state.block != document->end());
-		Expects(!state.i.atEnd());
-
-		while (state.i == state.block.begin()) {
-			if (state.block == document->begin()) {
-				state.block = document->end();
-				return false;
-			}
-			state.block = state.block.previous();
-			state.i = state.block.end();
-		}
-		--state.i;
-		return true;
-	};
-	const auto stateTag = [&](const State &state) {
+	const auto stateTag = [&](const FragmentState &state) {
 		const auto format = state.i.fragment().charFormat();
 		return format.property(kTagProperty).toString();
 	};
-	const auto stateTagHasLink = [&](const State &state) {
+	const auto stateTagHasLink = [&](const FragmentState &state) {
 		const auto tag = stateTag(state);
 		return (tag == link)
 			|| TextUtilities::SplitTags(tag).contains(QStringView(link));
 	};
-	const auto stateStart = [&](const State &state) {
-		return state.i.fragment().position();
-	};
-	const auto stateEnd = [&](const State &state) {
-		const auto fragment = state.i.fragment();
-		return fragment.position() + fragment.length();
-	};
-	auto state = State{ document->findBlock(position) };
-	if (state.block != document->end()) {
-		state.i = state.block.begin();
-	}
-	for (; skipInvalid(state); moveToNext(state)) {
-		const auto fragmentStart = stateStart(state);
-		const auto fragmentEnd = stateEnd(state);
+	auto state = FragmentStateAt(_inner->document(), position);
+	for (; SkipInvalidFragments(state); MoveToNextFragment(state)) {
+		const auto fragmentStart = FragmentStart(state);
+		const auto fragmentEnd = FragmentEnd(state);
 		if (fragmentEnd <= position) {
 			continue;
 		} else if (fragmentStart >= selection.till) {
@@ -4804,12 +4867,12 @@ auto InputField::selectionEditLinkData(EditLinkSelection selection) const
 			auto start = fragmentStart;
 			auto finish = fragmentEnd;
 			auto copy = state;
-			while (moveToPrevious(copy) && stateTagHasLink(copy)) {
-				start = stateStart(copy);
+			while (MoveToPreviousFragment(copy) && stateTagHasLink(copy)) {
+				start = FragmentStart(copy);
 			}
-			while (skipInvalid(state) && stateTagHasLink(state)) {
-				finish = stateEnd(state);
-				moveToNext(state);
+			while (SkipInvalidFragments(state) && stateTagHasLink(state)) {
+				finish = FragmentEnd(state);
+				MoveToNextFragment(state);
 			}
 			return { start, finish, link };
 		}
@@ -4846,64 +4909,15 @@ InputFieldTextRange InputField::selectionEditMarkdownTagRange(
 		? (selection.from - 1)
 		: selection.from;
 
-	struct State {
-		QTextBlock block;
-		QTextBlock::iterator i;
-	};
-	const auto document = _inner->document();
-	const auto skipInvalid = [&](State &state) {
-		if (state.block == document->end()) {
-			return false;
-		}
-		while (state.i.atEnd()) {
-			state.block = state.block.next();
-			if (state.block == document->end()) {
-				return false;
-			}
-			state.i = state.block.begin();
-		}
-		return true;
-	};
-	const auto moveToNext = [&](State &state) {
-		Expects(state.block != document->end());
-		Expects(!state.i.atEnd());
-
-		++state.i;
-	};
-	const auto moveToPrevious = [&](State &state) {
-		Expects(state.block != document->end());
-		Expects(!state.i.atEnd());
-
-		while (state.i == state.block.begin()) {
-			if (state.block == document->begin()) {
-				state.block = document->end();
-				return false;
-			}
-			state.block = state.block.previous();
-			state.i = state.block.end();
-		}
-		--state.i;
-		return true;
-	};
-	const auto stateTagHasMatch = [&](const State &state) {
+	const auto stateTagHasMatch = [&](const FragmentState &state) {
 		const auto format = state.i.fragment().charFormat();
 		return TextUtilities::SplitTags(
 			format.property(kTagProperty).toString()).contains(tag);
 	};
-	const auto stateStart = [&](const State &state) {
-		return state.i.fragment().position();
-	};
-	const auto stateEnd = [&](const State &state) {
-		const auto fragment = state.i.fragment();
-		return fragment.position() + fragment.length();
-	};
-	auto state = State{ document->findBlock(position) };
-	if (state.block != document->end()) {
-		state.i = state.block.begin();
-	}
-	for (; skipInvalid(state); moveToNext(state)) {
-		const auto fragmentStart = stateStart(state);
-		const auto fragmentEnd = stateEnd(state);
+	auto state = FragmentStateAt(_inner->document(), position);
+	for (; SkipInvalidFragments(state); MoveToNextFragment(state)) {
+		const auto fragmentStart = FragmentStart(state);
+		const auto fragmentEnd = FragmentEnd(state);
 		if (fragmentEnd <= position) {
 			continue;
 		} else if (fragmentStart > position) {
@@ -4913,12 +4927,12 @@ InputFieldTextRange InputField::selectionEditMarkdownTagRange(
 			auto from = fragmentStart;
 			auto till = fragmentEnd;
 			auto copy = state;
-			while (moveToPrevious(copy) && stateTagHasMatch(copy)) {
-				from = stateStart(copy);
+			while (MoveToPreviousFragment(copy) && stateTagHasMatch(copy)) {
+				from = FragmentStart(copy);
 			}
-			while (skipInvalid(state) && stateTagHasMatch(state)) {
-				till = stateEnd(state);
-				moveToNext(state);
+			while (SkipInvalidFragments(state) && stateTagHasMatch(state)) {
+				till = FragmentEnd(state);
+				MoveToNextFragment(state);
 			}
 			return { from, till };
 		}
@@ -4988,6 +5002,9 @@ void InputField::inputMethodEventInner(QInputMethodEvent *e) {
 		_lastPreEditText = preedit;
 		startPlaceholderAnimation();
 	}
+	if (InputMethodCommit::Paste(this, e)) {
+		return;
+	}
 	if (!e->commitString().isEmpty()) {
 		if (Emoji::Find(e->commitString(), nullptr)) {
 			// Finalize the active IME composition in the underlying QTextEdit.
@@ -5006,13 +5023,17 @@ void InputField::inputMethodEventInner(QInputMethodEvent *e) {
 			return;
 		}
 	}
-	_inputMethodCommit = e->commitString();
-
+	const auto text = e->commitString();
 	const auto weak = base::make_weak(this);
-	_inner->QTextEdit::inputMethodEvent(e);
-
-	if (weak && _inputMethodCommit.has_value()) {
-		const auto text = *base::take(_inputMethodCommit);
+	const auto forward = [&](not_null<QInputMethodEvent*> event) {
+		_inputMethodCommit = event->commitString();
+		_inner->QTextEdit::inputMethodEvent(event);
+		return weak && base::take(_inputMethodCommit).has_value();
+	};
+	_inputMethodCommit = std::nullopt;
+	if (InputMethodCommit::Perform(_inner.get(), e, forward)
+		? bool(weak)
+		: forward(e)) {
 		if (!processMarkdownReplaces(text)) {
 			processInstantReplaces(text);
 		}

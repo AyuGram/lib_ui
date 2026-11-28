@@ -78,6 +78,7 @@ public:
 			updateSize();
 		}
 	}
+	void setMinimalTopSkip(int skip) override;
 
 	bool isBoxShown() const override {
 		return !isHidden();
@@ -120,11 +121,14 @@ private:
 	[[nodiscard]] const style::Box &st() const;
 	[[nodiscard]] bool hasTitle() const;
 	[[nodiscard]] int titleHeight() const;
+	[[nodiscard]] int titleExtraHeight() const;
+	void updateContentGeometry();
 	[[nodiscard]] int buttonsHeight() const;
 	[[nodiscard]] int buttonsTop() const;
 	[[nodiscard]] int contentTop() const;
 	[[nodiscard]] int countFullHeight() const;
 	[[nodiscard]] int countRealHeight() const;
+	[[nodiscard]] int withMinimalTopSkip(int top) const;
 	[[nodiscard]] QRect loadingRect() const;
 	void updateMaxRealHeight();
 	void updateSize();
@@ -133,11 +137,13 @@ private:
 	not_null<LayerStackDelegate*> _layer;
 	rpl::variable<int> _realHeightMax;
 	rpl::variable<int> _contentHeightMax;
+	int _titleExtra = 0;
 	int _fullHeight = 0;
 	bool _layerType = false;
 
 	bool _noContentMargin = false;
 	int _maxContentHeight = 0;
+	int _minimalTopSkip = 0;
 	object_ptr<BoxContent> _content;
 
 	RoundRect _roundRect;

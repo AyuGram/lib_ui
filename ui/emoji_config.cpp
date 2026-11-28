@@ -33,11 +33,11 @@ constexpr auto kUniversalSize = 72;
 constexpr auto kImagesPerRow = 32;
 constexpr auto kImageRowsPerSprite = 16;
 
-constexpr auto kSetVersion = uint32(7);
-constexpr auto kCacheVersion = uint32(9);
+constexpr auto kSetVersion = uint32(8);
+constexpr auto kCacheVersion = uint32(10);
 constexpr auto kMaxId = uint32(1 << 8);
 
-#ifdef Q_OS_MAC
+#ifdef Q_OS_MACOS
 constexpr auto kScaleForTouchBar = 150;
 #endif
 
@@ -55,6 +55,9 @@ public:
 	explicit Instance(int size);
 
 	bool cached() const;
+#ifdef Q_OS_MACOS
+	bool generating() const;
+#endif // Q_OS_MACOS
 	void draw(QPainter &p, EmojiPtr emoji, int x, int y);
 
 private:
@@ -82,7 +85,7 @@ auto CanClearUniversal = false;
 auto WaitingToSwitchBackToId = 0;
 auto Updates = rpl::event_stream<>();
 
-#ifdef Q_OS_MAC
+#ifdef Q_OS_MACOS
 auto TouchbarSize = -1;
 auto TouchbarInstance = std::unique_ptr<Instance>();
 auto TouchbarEmoji = (Instance*)nullptr;
@@ -362,13 +365,23 @@ std::vector<QImage> LoadAndValidateSprites(int id) {
 	return result;
 }
 
+[[nodiscard]] bool UniversalInUse() {
+#ifdef Q_OS_MACOS
+	// WHY: UniversalImages::generate() reads Universal sprites
+	// on a background thread until TouchbarInstance is cached.
+	return TouchbarInstance && TouchbarInstance->generating();
+#else // Q_OS_MACOS
+	return false;
+#endif // Q_OS_MACOS
+}
+
 void ClearUniversalChecked() {
 	Expects(InstanceNormal != nullptr && InstanceLarge != nullptr);
 
 	if (Universal
 		&& InstanceNormal->cached()
 		&& InstanceLarge->cached()) {
-		if (CanClearUniversal) {
+		if (CanClearUniversal && !UniversalInUse()) {
 			Universal->clear();
 		}
 		ClearIrrelevantCache();
@@ -502,7 +515,7 @@ void Init() {
 	InstanceNormal = std::make_unique<Instance>(SizeNormal);
 	InstanceLarge = std::make_unique<Instance>(SizeLarge);
 
-#ifdef Q_OS_MAC
+#ifdef Q_OS_MACOS
 	if (style::Scale() != kScaleForTouchBar) {
 		TouchbarSize = int(style::ConvertScale(18 * 4 / 3.,
 			kScaleForTouchBar * style::DevicePixelRatio()));
@@ -520,7 +533,7 @@ void Clear() {
 
 	InstanceNormal = nullptr;
 	InstanceLarge = nullptr;
-#ifdef Q_OS_MAC
+#ifdef Q_OS_MACOS
 	TouchbarInstance = nullptr;
 	TouchbarEmoji = nullptr;
 #endif
@@ -624,7 +637,7 @@ int GetSizeLarge() {
 	return SizeLarge;
 }
 
-#ifdef Q_OS_MAC
+#ifdef Q_OS_MACOS
 int GetSizeTouchbar() {
 	return (style::Scale() == kScaleForTouchBar)
 		? GetSizeLarge()
@@ -783,7 +796,7 @@ const QPixmap &SinglePixmap(EmojiPtr emoji, int fontHeight) {
 }
 
 void Draw(QPainter &p, EmojiPtr emoji, int size, int x, int y) {
-#ifdef Q_OS_MAC
+#ifdef Q_OS_MACOS
 	const auto s = (style::Scale() == kScaleForTouchBar)
 		? SizeLarge
 		: TouchbarSize;
@@ -815,6 +828,14 @@ bool Instance::cached() const {
 
 	return (Universal->id() == _id) && (_sprites.size() == SpritesCount);
 }
+
+#ifdef Q_OS_MACOS
+bool Instance::generating() const {
+	// WHY: the guard lives until the on_main() callback ends,
+	// and in the last one cached() is already true.
+	return !cached() && _generating.alive();
+}
+#endif // Q_OS_MACOS
 
 void Instance::draw(QPainter &p, EmojiPtr emoji, int x, int y) {
 	if (_unsupported) {

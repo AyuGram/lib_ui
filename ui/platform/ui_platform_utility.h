@@ -27,6 +27,9 @@ namespace Ui::Platform {
 
 [[nodiscard]] bool IsApplicationActive();
 
+// Native maximized state, true before Qt delivers its (queued) state event.
+[[nodiscard]] bool IsMaximizedNatively(not_null<QWidget*> window);
+
 [[nodiscard]] bool TranslucentWindowsSupported();
 
 void InitOnTopPanel(not_null<QWidget*> panel);
@@ -56,6 +59,7 @@ void SetForeignTransientParent(
 	not_null<QWidget*> widget,
 	const ForeignParent &parent);
 void AcceptAllMouseInput(not_null<QWidget*> widget);
+void KeepOnCurrentSpace(not_null<QWidget*> widget);
 
 void DisableSystemWindowResize(not_null<QWidget*> widget, QSize ratio);
 
@@ -81,8 +85,8 @@ struct SystemTextReplaceResult {
 
 #if defined Q_OS_WINRT || defined Q_OS_WIN
 #include "ui/platform/win/ui_utility_win.h"
-#elif defined Q_OS_MAC // Q_OS_WINRT || Q_OS_WIN
+#elif defined Q_OS_MACOS // Q_OS_WINRT || Q_OS_WIN
 #include "ui/platform/mac/ui_utility_mac.h"
-#else // Q_OS_WINRT || Q_OS_WIN || Q_OS_MAC
+#else // Q_OS_WINRT || Q_OS_WIN || Q_OS_MACOS
 #include "ui/platform/linux/ui_utility_linux.h"
-#endif // else for Q_OS_WINRT || Q_OS_WIN || Q_OS_MAC
+#endif // else for Q_OS_WINRT || Q_OS_WIN || Q_OS_MACOS

@@ -61,6 +61,13 @@ QMargins RpWindow::frameMargins() const {
 	return _helper->frameMargins();
 }
 
+QRect RpWindow::fitFrameInWorkArea(
+		QRect body,
+		QRect space,
+		not_null<const QScreen*> screen) const {
+	return _helper->fitFrameInWorkArea(body, space, screen);
+}
+
 int RpWindow::additionalContentPadding() const {
 	return _helper->additionalContentPadding();
 }
@@ -80,6 +87,11 @@ rpl::producer<Platform::HitTestResult> RpWindow::systemButtonOver() const {
 
 rpl::producer<Platform::HitTestResult> RpWindow::systemButtonDown() const {
 	return _helper->systemButtonDown();
+}
+
+auto RpWindow::systemCommandRequests() const
+-> rpl::producer<not_null<Platform::SystemCommandRequest*>> {
+	return _helper->systemCommandRequests();
 }
 
 void RpWindow::overrideSystemButtonOver(Platform::HitTestResult button) {

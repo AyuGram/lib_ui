@@ -9,6 +9,8 @@
 #include "ui/rp_widget.h"
 #include "base/flags.h"
 
+class QScreen;
+
 namespace style {
 struct WindowTitle;
 struct TextStyle;
@@ -18,6 +20,7 @@ namespace Ui {
 namespace Platform {
 class BasicWindowHelper;
 struct HitTestRequest;
+struct SystemCommandRequest;
 enum class HitTestResult;
 } // namespace Platform
 
@@ -44,6 +47,10 @@ public:
 	[[nodiscard]] RpWidget *titleWidget();
 	[[nodiscard]] const RpWidget *titleWidget() const;
 	[[nodiscard]] QMargins frameMargins() const;
+	[[nodiscard]] QRect fitFrameInWorkArea(
+		QRect body,
+		QRect space,
+		not_null<const QScreen*> screen) const;
 
 	// In Windows 11 the window rounding shadow takes about
 	// round(1px * system_scale) from the window geometry on each side.
@@ -59,6 +66,8 @@ public:
 		-> rpl::producer<Platform::HitTestResult>;
 	[[nodiscard]] auto systemButtonDown() const
 		-> rpl::producer<Platform::HitTestResult>;
+	[[nodiscard]] auto systemCommandRequests() const
+		-> rpl::producer<not_null<Platform::SystemCommandRequest*>>;
 	void overrideSystemButtonOver(Platform::HitTestResult button);
 	void overrideSystemButtonDown(Platform::HitTestResult button);
 

@@ -53,7 +53,7 @@ void SideBarButton::setActive(bool active) {
 		return;
 	}
 	_active = active;
-	if (isListItem()) {
+	if (isPageTab()) {
 		// Announce selection via a dedicated selection event (the Windows
 		// bridge maps these to UIA_SelectionItem_ElementSelected); a generic
 		// state-change event is ignored for the selected state.
@@ -66,12 +66,12 @@ void SideBarButton::setActive(bool active) {
 }
 
 AccessibilityState SideBarButton::accessibilityState() const {
-	// Merge the base state so plain buttons keep reporting `pressed`. A list
-	// item exposes the active one as selected - persistently, independent of
+	// Merge the base state so plain buttons keep reporting `pressed`. A tab
+	// exposes the active one as selected - persistently, independent of
 	// keyboard focus. A locked (premium) folder stays a focusable, invokable
-	// list item but can never become current, so it isn't selectable.
+	// tab but can never become current, so it isn't selectable.
 	auto state = RippleButton::accessibilityState();
-	if (isListItem()) {
+	if (isPageTab()) {
 		state.selectable = !_lock.locked;
 		state.selected = _active;
 	}
@@ -100,6 +100,14 @@ void SideBarButton::setIconOverride(
 		const style::icon *iconOverrideActive) {
 	_iconOverride = iconOverride;
 	_iconOverrideActive = iconOverrideActive;
+	_iconCache = _iconCacheActive = QImage();
+	update();
+}
+
+void SideBarButton::setIconPainter(
+		Fn<bool(QPainter &, QRect, QColor)> painter) {
+	_iconPainter = std::move(painter);
+	_iconCache = _iconCacheActive = QImage();
 	update();
 }
 
@@ -176,14 +184,13 @@ void SideBarButton::paintEvent(QPaintEvent *e) {
 	}
 
 	if (_showIcon) {
-		const auto &icon = computeIcon();
 		const auto x = iconLeft();
 		const auto y = iconTop();
 		if (_iconCacheBadgeWidth || (_lock.locked && !_showText)) {
 			validateIconCache();
 			p.drawImage(x, y, _active ? _iconCacheActive : _iconCache);
 		} else {
-			icon.paint(p, x, y, width());
+			paintIcon(p, QPoint(x, y), width());
 		}
 	}
 	if (_showText) {
@@ -276,21 +283,39 @@ int SideBarButton::iconTop() const {
 		: _st.iconPosition.y();
 }
 
+void SideBarButton::paintIcon(
+		QPainter &p,
+		QPoint position,
+		int outerWidth) const {
+	const auto &icon = computeIcon();
+	const auto color = _active ? _st.textFgActive : _st.textFg;
+	const auto rect = style::rtlrect(
+		QRect(position, icon.size()),
+		outerWidth);
+	if (!_iconPainter || !_iconPainter(p, rect, color->c)) {
+		icon.paint(p, position, outerWidth);
+	}
+}
+
 void SideBarButton::validateIconCache() {
 	Expects(_st.iconPosition.x() < 0);
 
-	if (!(_active ? _iconCacheActive : _iconCache).isNull()) {
+	auto &image = _active ? _iconCacheActive : _iconCache;
+	if (!image.isNull() && !_iconPainter) {
 		return;
 	}
 	const auto &icon = computeIcon();
-	auto image = QImage(
-		icon.size() * style::DevicePixelRatio(),
-		QImage::Format_ARGB32_Premultiplied);
-	image.setDevicePixelRatio(style::DevicePixelRatio());
+	if (image.isNull()) {
+		const auto ratio = style::DevicePixelRatio();
+		image = QImage(
+			icon.size() * ratio,
+			QImage::Format_ARGB32_Premultiplied);
+		image.setDevicePixelRatio(ratio);
+	}
 	image.fill(Qt::transparent);
 	{
 		auto p = QPainter(&image);
-		icon.paint(p, 0, 0, icon.width());
+		paintIcon(p, QPoint(), icon.width());
 		p.setCompositionMode(QPainter::CompositionMode_Source);
 		auto hq = PainterHighQualityEnabler(p);
 		if (_iconCacheBadgeWidth) {
@@ -325,7 +350,6 @@ void SideBarButton::validateIconCache() {
 				radius);
 		}
 	}
-	(_active ? _iconCacheActive : _iconCache) = std::move(image);
 }
 
 void SideBarButton::validateLockIconCache() {

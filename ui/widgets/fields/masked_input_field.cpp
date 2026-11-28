@@ -180,9 +180,10 @@ void MaskedInputField::paintEvent(QPaintEvent *e) {
 		p.setClipRect(r);
 
 		auto placeholderTop = anim::interpolate(0, _st.placeholderShift, placeholderShiftDegree);
+		auto placeholderLeft = anim::interpolate(0, _st.placeholderShiftLeft, placeholderShiftDegree);
 
 		QRect r(rect().marginsRemoved(_textMargins + _st.placeholderMargins));
-		r.moveTop(r.top() + placeholderTop);
+		r.translate(placeholderLeft, placeholderTop);
 		if (style::RightToLeft()) r.moveLeft(width() - r.left() - r.width());
 
 		auto placeholderScale = 1. - (1. - _st.placeholderScale) * placeholderShiftDegree;
@@ -414,13 +415,13 @@ void MaskedInputField::keyPressEvent(QKeyEvent *e) {
 		cancelled();
 	} else if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
 		submitted(e->modifiers());
-#ifdef Q_OS_MAC
+#ifdef Q_OS_MACOS
 	} else if (e->key() == Qt::Key_E && e->modifiers().testFlag(Qt::ControlModifier)) {
 		auto selected = selectedText();
 		if (!selected.isEmpty() && echoMode() == QLineEdit::Normal) {
 			QGuiApplication::clipboard()->setText(selected, QClipboard::FindBuffer);
 		}
-#endif // Q_OS_MAC
+#endif // Q_OS_MACOS
 	}
 }
 
